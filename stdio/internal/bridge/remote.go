@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -15,14 +16,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hughhan1/mcp-bridge/internal/remote"
 	"github.com/hughhan1/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type remoteDelivery struct {
 	message jsonrpc.Message
@@ -59,49 +57,24 @@ func connectRemote(ctx context.Context, transport mcp.Transport) (mcp.Connection
 	switch t := transport.(type) {
 	case *mcp.StreamableClientTransport:
 		r.endpoint = t.Endpoint
-		client := http.DefaultClient
-		if t.HTTPClient != nil {
-			client = t.HTTPClient
-		}
-		copyClient := *client
-		rt := copyClient.Transport
-		if rt == nil {
-			rt = http.DefaultTransport
-		}
-		copyClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			req = req.Clone(req.Context())
+		copyTransport := remote.Streamable(*t, proxy.MaxMessageBytes, func(req *http.Request) {
 			r.mu.Lock()
 			version := r.version
 			r.mu.Unlock()
 			if version != "" && req.Header.Get("Mcp-Protocol-Version") == "" {
 				req.Header.Set("Mcp-Protocol-Version", version)
 			}
-			if headers, ok := req.Context().Value(remoteHeadersKey{}).(http.Header); ok {
-				maps.Copy(req.Header, headers)
-			}
-			res, err := rt.RoundTrip(req)
-			if err == nil {
-				media, _, _ := mime.ParseMediaType(res.Header.Get("Content-Type"))
-				if media != "text/event-stream" {
-					res.Body = http.MaxBytesReader(nil, res.Body, proxy.MaxMessageBytes)
-				}
-			}
-			return res, err
+			headers, _ := req.Context().Value(remoteHeadersKey{}).(http.Header)
+			maps.Copy(req.Header, headers)
+		}, func(contentType string) bool {
+			media, _, _ := mime.ParseMediaType(contentType)
+			return media == "text/event-stream"
 		})
-		r.client = &copyClient
-		copyTransport := *t
-		copyTransport.HTTPClient = r.client
-		copyTransport.DisableStandaloneSSE = true
-		copyTransport.MaxRetries = -1
-		if copyTransport.MaxEventSize <= 0 || copyTransport.MaxEventSize > proxy.MaxMessageBytes {
-			copyTransport.MaxEventSize = proxy.MaxMessageBytes
-		}
-		transport = &copyTransport
+		r.client = copyTransport.HTTPClient
+		transport = copyTransport
 	case *mcp.SSEClientTransport:
 		copyTransport := *t
-		if copyTransport.MaxEventSize <= 0 || copyTransport.MaxEventSize > proxy.MaxMessageBytes {
-			copyTransport.MaxEventSize = proxy.MaxMessageBytes
-		}
+		copyTransport.MaxEventSize = remote.EventSize(copyTransport.MaxEventSize, proxy.MaxMessageBytes)
 		transport = &copyTransport
 	}
 	conn, err := transport.Connect(connCtx)
@@ -125,6 +98,7 @@ func (r *remoteConnection) deliver(msg jsonrpc.Message, err error) {
 func (r *remoteConnection) read() {
 	for {
 		msg, err := r.Connection.Read(r.ctx)
+		var cancel context.CancelFunc
 		if response, ok := msg.(*jsonrpc.Response); ok {
 			r.mu.Lock()
 			query := r.queries[response.ID]
@@ -133,7 +107,7 @@ func (r *remoteConnection) read() {
 				query <- response
 				continue
 			}
-			cancel := r.calls[response.ID]
+			cancel = r.calls[response.ID]
 			delete(r.calls, response.ID)
 			initialize := response.ID == r.initialize && r.initialize.IsValid()
 			if initialize {
@@ -155,12 +129,10 @@ func (r *remoteConnection) read() {
 					}
 				}
 			}
-			r.deliver(msg, err)
-			if cancel != nil {
-				cancel()
-			}
-		} else {
-			r.deliver(msg, err)
+		}
+		r.deliver(msg, err)
+		if cancel != nil {
+			cancel()
 		}
 		if err != nil {
 			return
@@ -169,11 +141,7 @@ func (r *remoteConnection) read() {
 }
 
 func (r *remoteConnection) listen() {
-	req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, r.endpoint, nil)
-	if err != nil {
-		r.deliver(nil, err)
-		return
-	}
+	req, _ := http.NewRequestWithContext(r.ctx, http.MethodGet, r.endpoint, nil)
 	req.Header.Set("Accept", "text/event-stream")
 	if id := r.Connection.SessionID(); id != "" {
 		req.Header.Set("Mcp-Session-Id", id)
@@ -192,10 +160,7 @@ func (r *remoteConnection) listen() {
 		return
 	}
 	err = readEvents(res.Body, func(msg jsonrpc.Message) error { r.deliver(msg, nil); return r.ctx.Err() })
-	if err == nil {
-		err = io.EOF
-	}
-	r.deliver(nil, err)
+	r.deliver(nil, cmp.Or(err, io.EOF))
 }
 
 func (r *remoteConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
@@ -383,9 +348,6 @@ func readEvents(reader io.Reader, deliver func(jsonrpc.Message) error) error {
 			if err := dispatch(); err != nil {
 				return err
 			}
-			continue
-		}
-		if strings.HasPrefix(line, ":") {
 			continue
 		}
 		field, value, _ := strings.Cut(line, ":")

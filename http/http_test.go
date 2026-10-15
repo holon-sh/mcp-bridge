@@ -3,6 +3,7 @@ package mcphttp
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hughhan1/mcp-bridge/internal/testutil"
 	mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -150,40 +152,9 @@ func start(t *testing.T) (*Server, *httptest.Server) {
 	return b, s
 }
 
-func request(t *testing.T, method string, params map[string]any) *http.Request {
-	t.Helper()
-	if params == nil {
-		params = map[string]any{}
-	}
-	meta, _ := params["_meta"].(map[string]any)
-	if meta == nil {
-		meta = map[string]any{}
-		params["_meta"] = meta
-	}
-	meta["io.modelcontextprotocol/protocolVersion"] = ProtocolVersion
-	meta["io.modelcontextprotocol/clientInfo"] = map[string]any{"name": "test", "version": "1"}
-	meta["io.modelcontextprotocol/clientCapabilities"] = map[string]any{"extensions": map[string]any{"io.modelcontextprotocol/tasks": map[string]any{}}}
-	raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example/mcp", bytes.NewReader(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Mcp-Protocol-Version", ProtocolVersion)
-	req.Header.Set("Mcp-Method", method)
-	switch method {
-	case "tools/call", "prompts/get":
-		req.Header.Set("Mcp-Name", fmt.Sprint(params["name"]))
-	case "resources/read":
-		req.Header.Set("Mcp-Name", fmt.Sprint(params["uri"]))
-	}
-	return req
-}
-
 func send(t *testing.T, server *httptest.Server, method string, params map[string]any) (int, map[string]any) {
 	t.Helper()
-	req := request(t, method, params)
+	req := testutil.Request(t, method, params)
 	req.URL.Scheme, req.URL.Host = "http", strings.TrimPrefix(server.URL, "http://")
 	res, err := server.Client().Do(req)
 	if err != nil {
@@ -203,7 +174,7 @@ func TestConcurrentIDsAndProgress(t *testing.T) {
 	for i := 0; i < 16; i++ {
 		group.Go(func() {
 			params := map[string]any{"name": "echo", "arguments": map[string]any{"value": i}, "_meta": map[string]any{"progressToken": "same-token"}}
-			req := request(t, "tools/call", params)
+			req := testutil.Request(t, "tools/call", params)
 			req.URL.Host = strings.TrimPrefix(server.URL, "http://")
 			res, err := server.Client().Do(req)
 			if err != nil {
@@ -260,7 +231,7 @@ func TestPayloadForwarding(t *testing.T) {
 			}
 			invoke := func(method string, params map[string]any) *jsonrpc.Response {
 				t.Helper()
-				req := request(t, method, params).WithContext(ctx)
+				req := testutil.Request(t, method, params).WithContext(ctx)
 				var msg jsonrpc.Message
 				if conn == nil {
 					req.URL.Host = strings.TrimPrefix(server.URL, "http://")
@@ -361,7 +332,7 @@ func TestPayloadForwarding(t *testing.T) {
 
 func TestSubscriptions(t *testing.T) {
 	_, server := start(t)
-	req := request(t, "subscriptions/listen", nil)
+	req := testutil.Request(t, "subscriptions/listen", nil)
 	req.URL.Host = strings.TrimPrefix(server.URL, "http://")
 	res, err := server.Client().Do(req)
 	if err != nil {
@@ -409,10 +380,7 @@ func TestValidation(t *testing.T) {
 		{name: "oversized", body: strings.Repeat("x", 5<<20), status: 413},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if test.tool == "" {
-				test.tool = "headers"
-			}
-			req := request(t, "tools/call", map[string]any{"name": test.tool, "arguments": test.arguments})
+			req := testutil.Request(t, "tools/call", map[string]any{"name": cmp.Or(test.tool, "headers"), "arguments": test.arguments})
 			for name, values := range test.headers {
 				req.Header[name] = values
 			}
@@ -501,7 +469,7 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 				}
 				return 0, io.ErrClosedPipe
 			}}
-			req := request(t, "tools/call", map[string]any{"name": test.tool, "_meta": map[string]any{"progressToken": "progress"}}).WithContext(ctx)
+			req := testutil.Request(t, "tools/call", map[string]any{"name": test.tool, "_meta": map[string]any{"progressToken": "progress"}}).WithContext(ctx)
 			done := make(chan struct{})
 			go func() { b.ServeHTTP(writer, req); close(done) }()
 			select {

@@ -151,7 +151,7 @@ For clients using an `mcpServers` configuration:
 
 This repository provides these Go packages:
 
-- [`github.com/hughhan1/mcp-bridge/http`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/http) exposes a stdio MCP server as an HTTP handler.
+- [`github.com/hughhan1/mcp-bridge/http`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/http) serves stdio MCP servers over HTTP.
 - [`github.com/hughhan1/mcp-bridge/stdio`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
 - [`github.com/hughhan1/mcp-bridge/proxy`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
 
@@ -202,6 +202,7 @@ func serve(ctx context.Context) error {
 import (
     "context"
 
+    "github.com/hughhan1/mcp-bridge/proxy"
     mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
     "github.com/modelcontextprotocol/go-sdk/mcp"
     "golang.org/x/oauth2"
@@ -209,6 +210,7 @@ import (
 
 func connect(ctx context.Context, token string) error {
     client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+    client.Transport = proxy.NewRemoteTransport(client.Transport)
     return mcpbridge.Run(ctx,
         &mcp.StreamableClientTransport{Endpoint: "https://example.com/mcp", HTTPClient: client},
         &mcp.StdioTransport{},

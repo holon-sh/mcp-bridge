@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	internalremote "github.com/hughhan1/mcp-bridge/internal/remote"
 	"github.com/hughhan1/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,7 +34,7 @@ func requiresTranslation(ctx context.Context, remote *mcp.StreamableClientTransp
 		rt = http.DefaultTransport
 	}
 	var status atomic.Int32
-	clientCopy.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	clientCopy.Transport = internalremote.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		res, err := rt.RoundTrip(req)
 		if res != nil {
 			status.Store(int32(res.StatusCode))

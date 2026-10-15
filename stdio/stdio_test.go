@@ -155,10 +155,7 @@ func TestStdioRequestIDs(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Close()
-			id, err := jsonrpc.MakeID(value)
-			if err != nil {
-				t.Fatal(err)
-			}
+			id, _ := jsonrpc.MakeID(value)
 			for _, request := range []*jsonrpc.Request{
 				{ID: id, Method: "initialize", Params: json.RawMessage(`{"protocolVersion":"2025-11-25","clientInfo":{"name":"ids","version":"1"},"capabilities":{}}`)},
 				{Method: "notifications/initialized", Params: json.RawMessage(`{}`)},
