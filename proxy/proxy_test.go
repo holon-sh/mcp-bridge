@@ -16,9 +16,7 @@ import (
 func TestToolPages(t *testing.T) {
 	const tool = `{"name":"echo","inputSchema":{"const":9007199254740993},"extension":{"retained":true}}`
 	var wantTools []map[string]json.RawMessage
-	if err := json.Unmarshal([]byte("["+tool+"]"), &wantTools); err != nil {
-		t.Fatal(err)
-	}
+	_ = json.Unmarshal([]byte("["+tool+"]"), &wantTools)
 	for _, stop := range []string{"complete", "early", "cancelled"} {
 		t.Run(stop, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())

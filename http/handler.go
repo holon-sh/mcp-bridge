@@ -62,7 +62,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 			WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
 			return
 		}
-		if issue := ValidateHeaders(r.Header, req, b.version); issue != nil {
+		if issue := proxy.ValidateHeaders(r.Header, req, b.version); issue != nil {
 			WriteError(w, 400, req.ID, issue)
 			return
 		}
@@ -232,53 +232,4 @@ func accepts(headers http.Header, target string) bool {
 		}
 	}
 	return false
-}
-
-// ValidateHeaders checks that MCP headers match req and the expected protocol
-// version. req must be non-nil. It returns nil on success or a protocol error
-// describing the mismatch. Tool argument headers require
-// [proxy.ValidateArgumentHeaders] separately.
-func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
-	if headers.Get("Mcp-Protocol-Version") != expected || len(headers.Values("Mcp-Protocol-Version")) != 1 {
-		return proxy.UnsupportedVersion(headers.Get("Mcp-Protocol-Version"), []string{expected})
-	}
-	var params map[string]json.RawMessage
-	if json.Unmarshal(req.Params, &params) != nil {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "params must be an object"}
-	}
-	var meta map[string]json.RawMessage
-	if json.Unmarshal(params["_meta"], &meta) != nil {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "request metadata is required"}
-	}
-	var version string
-	_ = json.Unmarshal(meta[mcp.MetaKeyProtocolVersion], &version)
-	if version != expected {
-		return proxy.Mismatch("Mcp-Protocol-Version")
-	}
-	var info mcp.Implementation
-	var capabilities map[string]json.RawMessage
-	if json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info) != nil || info.Name == "" || info.Version == "" || json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities) != nil || capabilities == nil {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "clientInfo and clientCapabilities are required"}
-	}
-	if len(headers.Values("Mcp-Method")) != 1 || headers.Get("Mcp-Method") != req.Method {
-		return proxy.Mismatch("Mcp-Method")
-	}
-	field := ""
-	switch req.Method {
-	case "tools/call", "prompts/get":
-		field = "name"
-	case "resources/read":
-		field = "uri"
-	}
-	if field != "" {
-		var name string
-		if json.Unmarshal(params[field], &name) != nil || name == "" {
-			return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing name or uri"}
-		}
-		value, err := proxy.HeaderValue(headers, "Mcp-Name")
-		if err != nil || value != name {
-			return proxy.Mismatch("Mcp-Name")
-		}
-	}
-	return nil
 }
