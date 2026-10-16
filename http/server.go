@@ -44,6 +44,13 @@ type Server struct {
 	done         chan struct{}
 	work         sync.WaitGroup
 	legacyEvents *mcp.MemoryEventStore
+	afterFunc    func(time.Duration, func()) idleTimer
+}
+
+// idleTimer is the resettable session clock; production uses time.AfterFunc.
+type idleTimer interface {
+	Reset(time.Duration) bool
+	Stop() bool
 }
 
 type legacySession struct {
@@ -51,7 +58,7 @@ type legacySession struct {
 	version   string
 	cancel    context.CancelFunc
 	done      chan struct{}
-	timer     *time.Timer
+	timer     idleTimer
 	timeout   time.Duration
 	mu        sync.Mutex
 	closing   bool
@@ -77,6 +84,7 @@ func Start(ctx context.Context, command func() *exec.Cmd, opts Options) (*Server
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	b := &Server{ctx: ctx, cancel: cancel, command: command, version: version, sessions: make(map[string]*legacySession), done: make(chan struct{})}
+	b.afterFunc = func(d time.Duration, f func()) idleTimer { return time.AfterFunc(d, f) }
 	b.legacyEvents = mcp.NewMemoryEventStore(nil)
 	b.legacyEvents.SetMaxBytes(maxQueuedBytes)
 	if version != "" && !proxy.IsLegacyVersion(version) {
@@ -304,7 +312,7 @@ func (b *Server) newSession(id string, transport interface {
 		return nil, err
 	}
 	s.mu.Lock()
-	s.timer = time.AfterFunc(s.timeout, s.close)
+	s.timer = b.afterFunc(s.timeout, s.close)
 	s.mu.Unlock()
 	go func() {
 		err := proxy.Relay(ctx, process, &activeConnection{Connection: conn, session: s, pending: make(map[jsonrpc.ID]bool)})

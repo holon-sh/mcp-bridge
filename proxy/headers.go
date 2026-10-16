@@ -232,13 +232,31 @@ func Mismatch(name string) *jsonrpc.Error {
 	return &jsonrpc.Error{Code: mcp.CodeHeaderMismatch, Message: "header mismatch: " + name}
 }
 
+// ValidateProtocolHeader checks an optional MCP-Protocol-Version header.
+// Duplicate headers return HeaderMismatch; an explicit unsupported version
+// returns UnsupportedProtocolVersionError with negotiation data. Absence or an
+// empty value is allowed for legacy initialization and notifications; calls that
+// require the header use [ValidateHeaders].
+func ValidateProtocolHeader(headers http.Header, expected string) *jsonrpc.Error {
+	if len(headers.Values("Mcp-Protocol-Version")) > 1 {
+		return Mismatch("Mcp-Protocol-Version")
+	}
+	if version := headers.Get("Mcp-Protocol-Version"); version != "" && version != expected {
+		return UnsupportedVersion(version, []string{expected})
+	}
+	return nil
+}
+
 // ValidateHeaders checks that MCP headers match req and the expected protocol
 // version. req must be non-nil. It returns nil on success or a protocol error
 // describing the mismatch. Tool argument headers require
 // [ValidateArgumentHeaders] separately.
 func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
-	if headers.Get("Mcp-Protocol-Version") != expected || len(headers.Values("Mcp-Protocol-Version")) != 1 {
-		return UnsupportedVersion(headers.Get("Mcp-Protocol-Version"), []string{expected})
+	if issue := ValidateProtocolHeader(headers, expected); issue != nil {
+		return issue
+	}
+	if headers.Get("Mcp-Protocol-Version") == "" {
+		return Mismatch("Mcp-Protocol-Version")
 	}
 	var params map[string]json.RawMessage
 	if json.Unmarshal(req.Params, &params) != nil {

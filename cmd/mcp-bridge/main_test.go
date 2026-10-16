@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -52,10 +51,7 @@ type endpointWriter chan string
 
 func (d endpointWriter) Write(p []byte) (int, error) {
 	if text, ok := strings.CutPrefix(string(p), "MCP endpoint: "); ok {
-		select {
-		case d <- strings.Fields(text)[0]:
-		default:
-		}
+		d <- strings.Fields(text)[0]
 	}
 	return len(p), nil
 }
@@ -66,7 +62,7 @@ func TestServeCommand(t *testing.T) {
 		separator []string
 	}{{"separator", []string{"--"}}, {"executable", nil}} {
 		t.Run(boundary.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			d := make(endpointWriter, 1)
 			cwd := t.TempDir()
@@ -82,12 +78,7 @@ func TestServeCommand(t *testing.T) {
 			go func() {
 				finished <- run(ctx, args, io.NopCloser(strings.NewReader("")), nopWriter{io.Discard}, d)
 			}()
-			var endpoint string
-			select {
-			case endpoint = <-d:
-			case <-time.After(5 * time.Second):
-				t.Fatal("no listener")
-			}
+			endpoint := <-d
 			client := mcp.NewClient(&mcp.Implementation{Name: "cli-test", Version: "1"}, nil)
 			session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: endpoint}, nil)
 			if err != nil {
@@ -125,13 +116,8 @@ func TestServeCommand(t *testing.T) {
 			}
 			session.Close()
 			cancel()
-			select {
-			case err := <-finished:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatal(err)
-				}
-			case <-time.After(15 * time.Second):
-				t.Fatal("serve did not stop")
+			if err := <-finished; !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -171,7 +157,7 @@ func TestConnectCommand(t *testing.T) {
 			defer server.Close()
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			finished := make(chan error, 1)
 			var log bytes.Buffer
@@ -199,13 +185,8 @@ func TestConnectCommand(t *testing.T) {
 				}
 				session.Close()
 			}
-			select {
-			case err := <-finished:
-				if ctx.Err() != nil || !mode.redirect && err != nil {
-					t.Fatalf("connect: %v (deadline: %v)", err, ctx.Err())
-				}
-			case <-ctx.Done():
-				t.Fatal("connect did not stop")
+			if err := <-finished; !mode.redirect && err != nil {
+				t.Fatalf("connect: %v", err)
 			}
 			if log.Len() != 0 || received.Load() == 0 || contacted.Load() {
 				t.Fatalf("diagnostics=%q requests=%d cross-origin=%t", &log, received.Load(), contacted.Load())
@@ -217,7 +198,7 @@ func TestConnectCommand(t *testing.T) {
 func TestCLISignalAndStdout(t *testing.T) {
 	server := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return cliServer() }, &mcp.StreamableHTTPOptions{Stateless: true}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCLIProcess$", "--", "connect", server.URL)
 	cmd.Env = append(os.Environ(), "MCP_CLI_FIXTURE=cli")
@@ -234,9 +215,7 @@ func TestCLISignalAndStdout(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	finished := make(chan error, 1)
-	go func() { finished <- cmd.Wait(); close(finished) }()
-	t.Cleanup(func() { _ = cmd.Process.Kill(); <-finished })
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	_, _ = io.WriteString(input, `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}`+"\n")
 	var message map[string]any
 	if err := json.NewDecoder(output).Decode(&message); err != nil || message["result"] == nil {
@@ -245,13 +224,8 @@ func TestCLISignalAndStdout(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-finished:
-		if err != nil {
-			t.Fatalf("signal: %v %s", err, &stderr)
-		}
-	case <-ctx.Done():
-		t.Fatal("SIGTERM did not stop CLI")
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("signal: %v %s", err, &stderr)
 	}
 }
 

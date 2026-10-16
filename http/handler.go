@@ -51,8 +51,8 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "HTTP requests are cancelled by closing their response stream"})
 		return
 	}
-	if version := r.Header.Get("Mcp-Protocol-Version"); version != "" && version != b.version {
-		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(version, []string{b.version}))
+	if issue := proxy.ValidateProtocolHeader(r.Header, b.version); issue != nil {
+		WriteError(w, 400, req.ID, issue)
 		return
 	}
 	if req.IsCall() {

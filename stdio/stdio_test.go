@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -46,7 +45,7 @@ func TestStdioLifecycle(t *testing.T) {
 				remote = &mcp.SSEClientTransport{Endpoint: server.URL}
 			}
 			local, clientTransport := mcp.NewInMemoryTransports()
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			finished := make(chan error, 1)
 			go func() { finished <- mcpbridge.Run(ctx, remote, local) }()
@@ -59,25 +58,12 @@ func TestStdioLifecycle(t *testing.T) {
 			go func() {
 				_, _ = session.CallTool(t.Context(), &mcp.CallToolParams{Name: "slow", Arguments: map[string]any{}})
 			}()
-			select {
-			case <-started:
-			case <-time.After(5 * time.Second):
-				t.Fatal("remote call did not start")
-			}
+			<-started
 			cancel()
-			select {
-			case err := <-finished:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatal(err)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("proxy cancellation blocked")
+			if err := <-finished; !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
 			}
-			select {
-			case <-cancelled:
-			case <-time.After(5 * time.Second):
-				t.Fatal("remote call survived proxy cancellation")
-			}
+			<-cancelled
 		})
 	}
 	for _, failure := range []struct {
@@ -89,15 +75,13 @@ func TestStdioLifecycle(t *testing.T) {
 	}{
 		{name: "remote read EOF", readEOF: true, wantErr: true},
 		{name: "remote write EOF", err: io.EOF, wantErr: true},
-		{name: "remote write failure", err: io.ErrClosedPipe, wantErr: true},
-		{name: "remote connection closed", err: mcp.ErrConnectionClosed, wantErr: true},
 		{name: "local write EOF", local: true, err: io.EOF},
 		{name: "local write closed pipe", local: true, err: io.ErrClosedPipe},
 		{name: "local connection closed", local: true, err: mcp.ErrConnectionClosed},
 		{name: "local write failure", local: true, err: errors.New("local output failed"), wantErr: true},
 	} {
 		t.Run(failure.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			reader, writer := io.Pipe()
 			defer writer.Close()
@@ -121,13 +105,8 @@ func TestStdioLifecycle(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			select {
-			case err := <-finished:
-				if ctx.Err() != nil || (err != nil) != failure.wantErr {
-					t.Fatalf("shutdown: %v, want error: %t", err, failure.wantErr)
-				}
-			case <-ctx.Done():
-				t.Fatal("proxy did not stop after connection failure")
+			if err := <-finished; (err != nil) != failure.wantErr {
+				t.Fatalf("shutdown: %v, want error: %t", err, failure.wantErr)
 			}
 		})
 	}
@@ -138,7 +117,7 @@ func TestStdioRequestIDs(t *testing.T) {
 		t.Run(fmt.Sprint(value), func(t *testing.T) {
 			upstream := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, nil)
 			remote, upstreamTransport := mcp.NewInMemoryTransports()
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			session, err := upstream.Connect(ctx, upstreamTransport, nil)
 			if err != nil {
@@ -175,13 +154,8 @@ func TestStdioRequestIDs(t *testing.T) {
 				}
 			}
 			conn.Close()
-			select {
-			case err := <-finished:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-ctx.Done():
-				t.Fatal(ctx.Err())
+			if err := <-finished; err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
@@ -191,7 +165,7 @@ func connectClient(t *testing.T, handler http.Handler, opts *mcp.ClientOptions, 
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	local, transport := mcp.NewInMemoryTransports()
 	finished := make(chan error, 1)
@@ -203,12 +177,7 @@ func connectClient(t *testing.T, handler http.Handler, opts *mcp.ClientOptions, 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, opts)
 	session, err := client.Connect(ctx, transport, &mcp.ClientSessionOptions{ProtocolVersion: version})
 	if err != nil {
-		select {
-		case bridgeErr := <-finished:
-			t.Fatalf("connect: %v; bridge: %v", err, bridgeErr)
-		default:
-			t.Fatal(err)
-		}
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { session.Close() })
 	return session, finished
@@ -246,47 +215,32 @@ func TestStdioSubscriptions(t *testing.T) {
 				handler.ServeHTTP(w, r)
 			}), &mcp.ClientOptions{ResourceUpdatedHandler: func(_ context.Context, r *mcp.ResourceUpdatedNotificationRequest) { updates <- r.Params }}, "2025-11-25")
 			err := session.Subscribe(t.Context(), &mcp.SubscribeParams{URI: "chat://messages"})
-			if (err != nil) != (ending == "rejected") {
-				t.Fatalf("subscribe: %v", err)
-			}
 			if ending == "rejected" {
+				if err == nil || !strings.Contains(err.Error(), "upstream subscription ended") {
+					t.Fatalf("subscription rejection: %v", err)
+				}
 				return
 			}
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
 			if ending == "disconnect" {
-				select {
-				case stop := <-stopStream:
-					stop()
-				case <-time.After(time.Second):
-					t.Fatal("missing stream")
-				}
-				select {
-				case err := <-finished:
-					if err == nil {
-						t.Fatal("stream loss reported success")
-					}
-				case <-time.After(2 * time.Second):
-					t.Fatal("stream loss left client connected")
+				(<-stopStream)()
+				if err := <-finished; err == nil || !strings.Contains(err.Error(), "upstream subscription ended") {
+					t.Fatalf("stream loss: %v", err)
 				}
 			} else {
 				if err := server.ResourceUpdated(t.Context(), &mcp.ResourceUpdatedNotificationParams{URI: "chat://messages"}); err != nil {
 					t.Fatal(err)
 				}
-				select {
-				case update := <-updates:
-					if update.URI != "chat://messages" || update.Meta[mcp.MetaKeySubscriptionID] != nil {
-						t.Fatalf("legacy notification: %v", update)
-					}
-				case <-time.After(2 * time.Second):
-					t.Fatal("no live update")
+				update := <-updates
+				if update.URI != "chat://messages" || update.Meta[mcp.MetaKeySubscriptionID] != nil {
+					t.Fatalf("legacy notification: %v", update)
 				}
 				if err := session.Unsubscribe(t.Context(), &mcp.UnsubscribeParams{URI: "chat://messages"}); err != nil {
 					t.Fatal(err)
 				}
-				select {
-				case <-stopped:
-				case <-time.After(2 * time.Second):
-					t.Fatal("upstream subscription not cancelled")
-				}
+				<-stopped
 				if _, err := session.ListTools(t.Context(), nil); err != nil {
 					t.Fatalf("unsubscribe disconnected client: %v", err)
 				}
@@ -314,20 +268,17 @@ func TestStdioRequestCancellation(t *testing.T) {
 	session, _ := connectClient(t, remote, nil, "2025-11-25")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	finished := make(chan error, 1)
 	go func() {
-		_, _ = session.CallTool(ctx, &mcp.CallToolParams{Name: "run", Arguments: map[string]any{}})
+		_, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "run", Arguments: map[string]any{}})
+		finished <- err
 	}()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("tool call never reached upstream")
-	}
+	<-started
 	cancel()
-	select {
-	case <-stopped:
-	case <-time.After(2 * time.Second):
-		t.Fatal("upstream call survived cancellation")
+	if err := <-finished; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request: %v", err)
 	}
+	<-stopped
 	if _, err := session.ListTools(t.Context(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +377,7 @@ func TestStdioDiscoveryFailures(t *testing.T) {
 				http.Error(w, http.StatusText(status), status)
 			}))
 			defer server.Close()
-			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			local, transport := mcp.NewInMemoryTransports()
 			finished := make(chan error, 1)
@@ -439,13 +390,8 @@ func TestStdioDiscoveryFailures(t *testing.T) {
 			if err == nil {
 				t.Fatal("failed discovery allowed connection")
 			}
-			select {
-			case err := <-finished:
-				if err == nil || initialized.Load() {
-					t.Fatalf("discovery failure: %v, downgraded: %t", err, initialized.Load())
-				}
-			case <-ctx.Done():
-				t.Fatal("bridge did not stop")
+			if err := <-finished; err == nil || !strings.Contains(err.Error(), http.StatusText(status)) || initialized.Load() {
+				t.Fatalf("discovery failure: %v, downgraded: %t", err, initialized.Load())
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-package bridge
+package mcpstdio
 
 import (
 	"bufio"
@@ -175,103 +175,100 @@ func (r *remoteConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
 }
 
 func (r *remoteConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
-	var call bool
-	if req, ok := msg.(*jsonrpc.Request); ok {
-		r.mu.Lock()
-		if r.closed {
-			r.mu.Unlock()
-			return mcp.ErrConnectionClosed
-		}
-		if req.Method == "initialize" {
-			var params mcp.InitializeParams
-			if err := json.Unmarshal(req.Params, &params); err != nil || !proxy.IsLegacyVersion(params.ProtocolVersion) {
-				r.mu.Unlock()
-				return errors.New("initialize requires a supported legacy protocol version")
-			}
-			r.version, r.initialize = params.ProtocolVersion, req.ID
-		}
-		if req.Method == "notifications/cancelled" {
-			var params mcp.CancelledParams
-			_ = json.Unmarshal(req.Params, &params)
-			id, _ := jsonrpc.MakeID(params.RequestID)
-			cancel := r.calls[id]
-			delete(r.calls, id)
-			current := r.client != nil && !proxy.IsLegacyVersion(r.version)
-			r.mu.Unlock()
-			var err error
-			if !current {
-				err = r.Connection.Write(ctx, msg)
-			}
-			if cancel != nil {
-				cancel()
-			}
-			return err
-		}
-		if req.IsCall() {
-			if len(r.calls) >= proxy.MaxRequests {
-				r.mu.Unlock()
-				return errors.New("MCP request limit exceeded")
-			}
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithCancel(ctx)
-			r.calls[req.ID] = cancel
-			call = true
-			r.writes.Add(1)
-		}
+	req, ok := msg.(*jsonrpc.Request)
+	if !ok {
+		return r.Connection.Write(ctx, msg)
+	}
+	r.mu.Lock()
+	if r.closed {
 		r.mu.Unlock()
+		return mcp.ErrConnectionClosed
 	}
-	if call {
-		go func() {
-			defer r.writes.Done()
-			req := msg.(*jsonrpc.Request)
-			var err error
-			var params struct {
-				Name string   `json:"name"`
-				URI  string   `json:"uri"`
-				Meta mcp.Meta `json:"_meta"`
-			}
-			_ = json.Unmarshal(req.Params, &params)
-			version, _ := params.Meta[mcp.MetaKeyProtocolVersion].(string)
-			if r.client != nil && version >= proxy.CurrentVersion {
-				headers := make(http.Header)
-				switch req.Method {
-				case "tools/call", "prompts/get":
-					headers.Set("Mcp-Name", proxy.EncodeHeader(params.Name))
-				case "resources/read":
-					headers.Set("Mcp-Name", proxy.EncodeHeader(params.URI))
-				}
-				if req.Method == "tools/call" {
-					var arguments []proxy.HeaderArgument
-					arguments, err = proxy.ToolHeaderArguments(ctx, req.Params, r.request)
-					if err == nil {
-						err = proxy.SetArgumentHeaders(headers, arguments)
-					}
-				}
-				ctx = context.WithValue(ctx, remoteHeadersKey{}, headers)
-			}
-			if err == nil {
-				err = r.Connection.Write(ctx, msg)
-			}
-			if err != nil && ctx.Err() == nil {
-				var rpcErr *jsonrpc.Error
-				if errors.As(err, &rpcErr) {
-					id := msg.(*jsonrpc.Request).ID
-					r.mu.Lock()
-					cancel := r.calls[id]
-					delete(r.calls, id)
-					r.mu.Unlock()
-					r.deliver(&jsonrpc.Response{ID: id, Error: rpcErr}, nil)
-					if cancel != nil {
-						cancel()
-					}
-				} else {
-					r.deliver(nil, err)
-				}
-			}
-		}()
-		return nil
+	if req.Method == "initialize" {
+		var params mcp.InitializeParams
+		if err := json.Unmarshal(req.Params, &params); err != nil || !proxy.IsLegacyVersion(params.ProtocolVersion) {
+			r.mu.Unlock()
+			return errors.New("initialize requires a supported legacy protocol version")
+		}
+		r.version, r.initialize = params.ProtocolVersion, req.ID
 	}
-	return r.Connection.Write(ctx, msg)
+	if req.Method == "notifications/cancelled" {
+		var params mcp.CancelledParams
+		_ = json.Unmarshal(req.Params, &params)
+		id, _ := jsonrpc.MakeID(params.RequestID)
+		cancel := r.calls[id]
+		delete(r.calls, id)
+		current := r.client != nil && !proxy.IsLegacyVersion(r.version)
+		r.mu.Unlock()
+		var err error
+		if !current {
+			err = r.Connection.Write(ctx, msg)
+		}
+		if cancel != nil {
+			cancel()
+		}
+		return err
+	}
+	if !req.IsCall() {
+		r.mu.Unlock()
+		return r.Connection.Write(ctx, msg)
+	}
+	if len(r.calls) >= proxy.MaxRequests {
+		r.mu.Unlock()
+		return errors.New("MCP request limit exceeded")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	r.calls[req.ID] = cancel
+	r.writes.Add(1)
+	r.mu.Unlock()
+	go func() {
+		defer r.writes.Done()
+		var err error
+		var params struct {
+			Name string   `json:"name"`
+			URI  string   `json:"uri"`
+			Meta mcp.Meta `json:"_meta"`
+		}
+		_ = json.Unmarshal(req.Params, &params)
+		version, _ := params.Meta[mcp.MetaKeyProtocolVersion].(string)
+		if r.client != nil && version >= proxy.CurrentVersion {
+			headers := make(http.Header)
+			switch req.Method {
+			case "tools/call", "prompts/get":
+				headers.Set("Mcp-Name", proxy.EncodeHeader(params.Name))
+			case "resources/read":
+				headers.Set("Mcp-Name", proxy.EncodeHeader(params.URI))
+			}
+			if req.Method == "tools/call" {
+				var arguments []proxy.HeaderArgument
+				arguments, err = proxy.ToolHeaderArguments(ctx, req.Params, r.request)
+				if err == nil {
+					err = proxy.SetArgumentHeaders(headers, arguments)
+				}
+			}
+			ctx = context.WithValue(ctx, remoteHeadersKey{}, headers)
+		}
+		if err == nil {
+			err = r.Connection.Write(ctx, msg)
+		}
+		if err != nil && ctx.Err() == nil {
+			var rpcErr *jsonrpc.Error
+			if errors.As(err, &rpcErr) {
+				id := req.ID
+				r.mu.Lock()
+				cancel := r.calls[id]
+				delete(r.calls, id)
+				r.mu.Unlock()
+				r.deliver(&jsonrpc.Response{ID: id, Error: rpcErr}, nil)
+				if cancel != nil {
+					cancel()
+				}
+			} else {
+				r.deliver(nil, err)
+			}
+		}
+	}()
+	return nil
 }
 
 func (r *remoteConnection) request(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {

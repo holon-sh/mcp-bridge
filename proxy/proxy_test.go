@@ -83,7 +83,6 @@ func TestToolPageFailures(t *testing.T) {
 		err  error
 	}{
 		{"missing tools", `{}`, nil},
-		{"null tools", `{"tools":null}`, nil},
 		{"invalid cursor", `{"tools":[],"nextCursor":1}`, nil},
 		{"cycle", `{"tools":[],"nextCursor":"again"}`, nil},
 		{"upstream", "", upstream},

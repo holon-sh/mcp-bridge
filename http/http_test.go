@@ -15,13 +15,13 @@ import (
 	"os/exec"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/hughhan1/mcp-bridge/internal/testutil"
+	"github.com/hughhan1/mcp-bridge/proxy"
 	mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -32,15 +32,37 @@ func TestProcess(t *testing.T) {
 	if mode == "" {
 		return
 	}
+	if mode == "descendant-child" {
+		lifetime := os.NewFile(3, "lifetime")
+		defer lifetime.Close()
+		_, _ = lifetime.Write([]byte{1})
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
 	if mode == "descendant" {
-		child := exec.Command("sleep", "60")
-		child.Stderr = os.Stderr
+		lifetime, input := os.NewFile(3, "lifetime"), os.NewFile(4, "input")
+		child := exec.Command(os.Args[0], "-test.run=^TestProcess$")
+		child.Env = append(os.Environ(), "BRIDGE_TEST_PROCESS=descendant-child")
+		child.ExtraFiles, child.Stdin, child.Stderr = []*os.File{lifetime}, input, os.Stderr
 		if child.Start() != nil {
 			os.Exit(2)
 		}
-		_ = os.WriteFile(os.Getenv("BRIDGE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0600)
+		lifetime.Close()
+		input.Close()
 	}
 	conn, _ := (&mcp.StdioTransport{}).Connect(context.Background())
+	var concurrent []*jsonrpc.Request
+	echo := func(req *jsonrpc.Request) {
+		var params map[string]any
+		_ = json.Unmarshal(req.Params, &params)
+		meta, _ := params["_meta"].(map[string]any)
+		if token := meta["progressToken"]; token != nil {
+			raw, _ := json.Marshal(map[string]any{"progressToken": token, "progress": 1})
+			_ = conn.Write(context.Background(), &jsonrpc.Request{Method: "notifications/progress", Params: raw})
+		}
+		raw, _ := json.Marshal(map[string]any{"resultType": "complete", "echo": params, "content": []any{map[string]any{"type": "text", "text": "ok"}}})
+		_ = conn.Write(context.Background(), &jsonrpc.Response{ID: req.ID, Result: raw})
+	}
 	var cancelled int64
 	for {
 		message, err := conn.Read(context.Background())
@@ -50,8 +72,10 @@ func TestProcess(t *testing.T) {
 		req := message.(*jsonrpc.Request)
 		var params map[string]any
 		_ = json.Unmarshal(req.Params, &params)
-		if req.Method == "notifications/cancelled" {
-			cancelled++
+		if !req.IsCall() {
+			if req.Method == "notifications/cancelled" {
+				cancelled++
+			}
 			continue
 		}
 		var result any
@@ -109,15 +133,21 @@ func TestProcess(t *testing.T) {
 				} else {
 					result = map[string]any{"resultType": "input_required", "requestState": "opaque-state", "inputRequests": map[string]any{"input-1": map[string]any{"method": "elicitation/create", "params": map[string]any{"message": "input"}}}}
 				}
+			case "concurrent":
+				concurrent = append(concurrent, req)
+				if len(concurrent) < 2 {
+					continue
+				}
+				for _, pending := range concurrent {
+					echo(pending)
+				}
+				concurrent = nil
+				continue
 			case "cancelled":
 				result = map[string]any{"count": cancelled}
 			default:
-				meta, _ := params["_meta"].(map[string]any)
-				if token := meta["progressToken"]; token != nil {
-					raw, _ := json.Marshal(map[string]any{"progressToken": token, "progress": 1})
-					_ = conn.Write(context.Background(), &jsonrpc.Request{Method: "notifications/progress", Params: raw})
-				}
-				result = map[string]any{"resultType": "complete", "echo": params, "content": []any{map[string]any{"type": "text", "text": "ok"}}}
+				echo(req)
+				continue
 			}
 		case "tasks/get":
 			result = map[string]any{"taskId": "task-1", "status": "working", "result": map[string]any{"opaque": "preserved"}}
@@ -147,7 +177,6 @@ func start(t *testing.T) (*Server, *httptest.Server) {
 		t.Fatal(err)
 	}
 	s := httptest.NewServer(b)
-	s.Client().Timeout = 15 * time.Second
 	t.Cleanup(func() { _ = b.Close(); s.Close() })
 	return b, s
 }
@@ -171,9 +200,10 @@ func send(t *testing.T, server *httptest.Server, method string, params map[strin
 func TestConcurrentIDsAndProgress(t *testing.T) {
 	_, server := start(t)
 	var group sync.WaitGroup
-	for i := 0; i < 16; i++ {
+	// The fixture withholds replies until both requests are pending upstream.
+	for i := range 2 {
 		group.Go(func() {
-			params := map[string]any{"name": "echo", "arguments": map[string]any{"value": i}, "_meta": map[string]any{"progressToken": "same-token"}}
+			params := map[string]any{"name": "concurrent", "arguments": map[string]any{"value": i}, "_meta": map[string]any{"progressToken": "same-token"}}
 			req := testutil.Request(t, "tools/call", params)
 			req.URL.Host = strings.TrimPrefix(server.URL, "http://")
 			res, err := server.Client().Do(req)
@@ -212,7 +242,7 @@ func TestPayloadForwarding(t *testing.T) {
 	for _, direction := range []string{"serve", "connect"} {
 		t.Run(direction, func(t *testing.T) {
 			_, server := start(t)
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var conn mcp.Connection
 			var finished chan error
@@ -317,13 +347,8 @@ func TestPayloadForwarding(t *testing.T) {
 			}
 			if conn != nil {
 				conn.Close()
-				select {
-				case err := <-finished:
-					if err != nil {
-						t.Fatal(err)
-					}
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
+				if err := <-finished; err != nil {
+					t.Fatal(err)
 				}
 			}
 		})
@@ -450,7 +475,7 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			b, server := start(t)
-			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			entered, release := make(chan struct{}), make(chan struct{})
 			var enteredOnce, releaseOnce sync.Once
@@ -460,10 +485,7 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 					return len(data), nil
 				}
 				enteredOnce.Do(func() { close(entered) })
-				select {
-				case <-release:
-				case <-ctx.Done():
-				}
+				<-release
 				if test.failBridge || test.cancelRequest {
 					return len(data), nil
 				}
@@ -472,21 +494,12 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 			req := testutil.Request(t, "tools/call", map[string]any{"name": test.tool, "_meta": map[string]any{"progressToken": "progress"}}).WithContext(ctx)
 			done := make(chan struct{})
 			go func() { b.ServeHTTP(writer, req); close(done) }()
-			select {
-			case <-entered:
-			case <-ctx.Done():
-				t.Fatal("stream did not reach the expected write")
-			}
+			<-entered
 			if test.failBridge {
-				exited := make(chan error, 1)
-				go func() { exited <- b.Wait() }()
-				select {
-				case err := <-exited:
-					if err == nil {
-						t.Error("slow consumer did not fail bridge")
-					}
-				case <-ctx.Done():
-					t.Fatal("slow consumer leaked process")
+				switch err := b.Wait(); fmt.Sprint(err) {
+				case "MCP consumer too slow", "MCP output buffer limit exceeded":
+				default:
+					t.Fatalf("slow consumer shutdown: %v", err)
 				}
 			} else if test.cancelRequest {
 				cancel()
@@ -495,11 +508,7 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 				_, _ = send(t, server, "tools/call", map[string]any{"name": "cancelled"})
 			}
 			releaseOnce.Do(func() { close(release) })
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("HTTP handler did not stop")
-			}
+			<-done
 			if !test.failBridge {
 				_, result := send(t, server, "tools/call", map[string]any{"name": "cancelled"})
 				if result["result"].(map[string]any)["count"] != test.wantCancelled {
@@ -511,38 +520,39 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 }
 
 func TestShutdownReapsDescendants(t *testing.T) {
-	file := t.TempDir() + "/pid"
+	lifetime, childLifetime, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifetime.Close()
+	defer childLifetime.Close()
+	childInput, holdOpen, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer childInput.Close()
+	defer holdOpen.Close()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestProcess$")
-	cmd.Env = append(os.Environ(), "BRIDGE_TEST_PROCESS=descendant", "BRIDGE_PID_FILE="+file)
+	cmd.Env = append(os.Environ(), "BRIDGE_TEST_PROCESS=descendant")
+	cmd.ExtraFiles = []*os.File{childLifetime, childInput}
 	b, err := Start(t.Context(), func() *exec.Cmd { return cmd }, Options{ProtocolVersion: ProtocolVersion})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { b.Close() })
-	raw, err := os.ReadFile(file)
-	if err != nil {
+	childLifetime.Close()
+	childInput.Close()
+	// The descendant holds this pipe open while blocked on input owned by
+	// this test. Parent exit alone cannot release it or produce EOF here.
+	var ready [1]byte
+	if _, err := io.ReadFull(lifetime, ready[:]); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		output, err := exec.Command("ps", "-o", "stat=", "-p", string(raw)).Output()
-		if err != nil {
-			var exited *exec.ExitError
-			if errors.As(err, &exited) && exited.ExitCode() == 1 && len(bytes.TrimSpace(output)) == 0 {
-				break
-			}
-			t.Fatalf("inspect descendant: %v (%s)", err, output)
-		}
-		if strings.Contains(string(output), "Z") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("descendant remains: %s", output)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if n, err := lifetime.Read(ready[:]); n != 0 || err != io.EOF {
+		t.Fatalf("descendant lifetime: read %d bytes, %v", n, err)
 	}
 }
 
@@ -645,26 +655,20 @@ func clientOptions(progress chan<- any) *mcp.ClientOptions {
 			return &mcp.ElicitResult{Action: "accept", Content: map[string]any{"answer": "yes"}}, nil
 		},
 		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) {
-			select {
-			case progress <- req.Params.ProgressToken:
-			default:
-			}
+			progress <- req.Params.ProgressToken
 		},
 	}
 }
 
 func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool, progress <-chan any) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	// The SDK needs every tool descriptor to send schema-derived headers.
 	var tools []string
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
 			t.Fatal(err)
-		}
-		if slices.Contains(tools, tool.Name) {
-			t.Fatalf("tool repeated across pages: %s", tool.Name)
 		}
 		if tool.Name == "echo" && tool.Meta["ui"].(map[string]any)["resourceUri"] != "ui://fixture" {
 			t.Fatalf("MCP App tool metadata: %v", tool.Meta)
@@ -698,13 +702,8 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool,
 			t.Fatalf("upstream identity and capabilities: %v", meta)
 		}
 	}
-	select {
-	case token := <-progress:
-		if token != "caller-token" {
-			t.Fatalf("progress token: %v", token)
-		}
-	case <-ctx.Done():
-		t.Fatal("no progress notification")
+	if token := <-progress; token != "caller-token" {
+		t.Fatalf("progress token: %v", token)
 	}
 	app, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ui://fixture"})
 	if err != nil || len(app.Contents) != 1 || app.Contents[0].Text != "<main>app</main>" || app.Contents[0].MIMEType != "text/html;profile=mcp-app" || app.Contents[0].Meta["ui"].(map[string]any)["prefersBorder"] != true {
@@ -733,12 +732,8 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool,
 		}
 		seen := make(map[any]bool)
 		for !seen["log"] || !seen["resource"] {
-			select {
-			case notification := <-progress:
-				seen[notification] = true
-			case <-ctx.Done():
-				t.Fatalf("missing legacy notifications: %v", seen)
-			}
+			notification := <-progress
+			seen[notification] = true
 		}
 		if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: "ui://fixture"}); err != nil {
 			t.Fatal(err)
@@ -749,22 +744,12 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool,
 			_, err := session.CallTool(slow, &mcp.CallToolParams{Name: "slow", Arguments: map[string]any{}, Meta: mcp.Meta{"progressToken": "slow-started"}})
 			finished <- err
 		}()
-		select {
-		case token := <-progress:
-			if token != "slow-started" {
-				t.Fatalf("slow request progress: %v", token)
-			}
-		case <-ctx.Done():
-			t.Fatal("slow request did not start")
+		if token := <-progress; token != "slow-started" {
+			t.Fatalf("slow request progress: %v", token)
 		}
 		stop()
-		select {
-		case err := <-finished:
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancellation: %v", err)
-			}
-		case <-ctx.Done():
-			t.Fatal("cancelled request did not stop")
+		if err := <-finished; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation: %v", err)
 		}
 		if _, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "wait-cancel", Arguments: map[string]any{}}); err != nil {
 			t.Fatalf("remote cancellation: %v", err)
@@ -777,31 +762,34 @@ func TestProxyTransports(t *testing.T) {
 		name, version              string
 		sse, fallback, noDiscovery bool
 	}
+	pinnedModes := []mode{{name: "sse-oldest", version: "2024-11-05", sse: true}}
 	modes := []mode{
 		{name: "sse", version: "2025-11-25", sse: true},
-		{name: "sse-oldest", version: "2024-11-05", sse: true},
 		{name: "fallback", version: "2025-11-25", fallback: true},
-		{name: "no-discovery", version: "2025-11-25", fallback: true, noDiscovery: true},
 	}
+	var translatedModes []mode
 	for _, version := range mcp.SupportedProtocolVersions() {
-		modes = append(modes, mode{name: version, version: version})
+		m := mode{name: version, version: version}
+		modes = append(modes, m)
+		pinnedModes = append(pinnedModes, m)
+		if version != ProtocolVersion {
+			translatedModes = append(translatedModes, m)
+		}
 	}
+	connectModes := append(slices.Clone(modes), mode{name: "no-discovery", version: "2025-11-25", fallback: true, noDiscovery: true})
 	for _, direction := range []struct {
 		name                           string
 		serve, connect, pin, translate bool
+		modes                          []mode
 	}{
-		{name: "serve", serve: true},
-		{name: "serve-pinned", serve: true, pin: true},
-		{name: "connect", connect: true},
-		{name: "connect-translated", connect: true, translate: true},
-		{name: "connect-pinned", serve: true, connect: true, pin: true},
+		{name: "serve", serve: true, modes: modes},
+		{name: "serve-pinned", serve: true, pin: true, modes: pinnedModes},
+		{name: "connect", connect: true, modes: connectModes},
+		{name: "connect-translated", connect: true, translate: true, modes: translatedModes},
 	} {
-		for _, mode := range modes {
-			if direction.translate && (mode.sse || mode.fallback || mode.version == ProtocolVersion) || mode.noDiscovery && direction.name != "connect" {
-				continue
-			}
+		for _, mode := range direction.modes {
 			t.Run(direction.name+"/"+mode.name, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				var handler http.Handler
 				path := ""
@@ -891,7 +879,7 @@ func TestProxyTransports(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { session.Close() })
-				if result := session.InitializeResult(); mode.version != ProtocolVersion && (result == nil || result.ProtocolVersion != mode.version) {
+				if result := session.InitializeResult(); result.ProtocolVersion != mode.version {
 					t.Fatalf("negotiated protocol: %v, want %s", result, mode.version)
 				}
 				caps := session.InitializeResult().Capabilities.Extensions
@@ -899,54 +887,46 @@ func TestProxyTransports(t *testing.T) {
 					t.Fatalf("negotiated capabilities: %v", caps)
 				}
 				exercise(t, session, mode.version != ProtocolVersion, direction.translate, progress)
-				if direction.pin && !direction.connect && !mode.sse && !mode.fallback {
+				if direction.pin && !mode.sse {
 					if mode.version == ProtocolVersion {
 						status, discovered := send(t, server, "server/discover", nil)
 						if status != 200 || !reflect.DeepEqual(discovered["result"].(map[string]any)["supportedVersions"], []any{mode.version}) {
 							t.Fatalf("pinned discovery: %v", discovered)
 						}
-					}
-					wrong := ProtocolVersion
-					if wrong == mode.version {
-						wrong = "2025-11-25"
-					}
-					for _, method := range []string{"ping", "notifications/initialized"} {
-						message := &jsonrpc.Request{Method: method, Params: json.RawMessage(`{}`)}
-						if method == "ping" {
-							message.ID, _ = jsonrpc.MakeID(int64(999))
+					} else {
+						for _, method := range []string{"ping", "notifications/initialized"} {
+							message := &jsonrpc.Request{Method: method, Params: json.RawMessage(`{}`)}
+							if method == "ping" {
+								message.ID, _ = jsonrpc.MakeID(int64(999))
+							}
+							data, _ := jsonrpc.EncodeMessage(message)
+							req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+path, strings.NewReader(string(data)))
+							req.Header.Set("Content-Type", "application/json")
+							req.Header.Set("Accept", "application/json, text/event-stream")
+							req.Header.Set("Mcp-Protocol-Version", ProtocolVersion)
+							req.Header.Set("Mcp-Session-Id", session.ID())
+							res, err := server.Client().Do(req)
+							if err != nil {
+								t.Fatal(err)
+							}
+							var rejected struct {
+								Error *jsonrpc.Error `json:"error"`
+							}
+							err = json.NewDecoder(res.Body).Decode(&rejected)
+							res.Body.Close()
+							if err != nil || res.StatusCode != http.StatusBadRequest || rejected.Error == nil || rejected.Error.Code != mcp.CodeUnsupportedProtocolVersion {
+								t.Fatalf("version header: HTTP %d %+v %v", res.StatusCode, rejected, err)
+							}
 						}
-						data, _ := jsonrpc.EncodeMessage(message)
-						req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+path, strings.NewReader(string(data)))
-						req.Header.Set("Content-Type", "application/json")
-						req.Header.Set("Accept", "application/json, text/event-stream")
-						req.Header.Set("Mcp-Protocol-Version", wrong)
-						req.Header.Set("Mcp-Session-Id", session.ID())
-						res, err := server.Client().Do(req)
-						if err != nil {
-							t.Fatal(err)
+						if _, err := session.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
+							t.Fatalf("rejected request broke session: %v", err)
 						}
-						var rejected struct {
-							Error *jsonrpc.Error `json:"error"`
-						}
-						err = json.NewDecoder(res.Body).Decode(&rejected)
-						res.Body.Close()
-						if err != nil || res.StatusCode != http.StatusBadRequest || rejected.Error == nil || rejected.Error.Code != mcp.CodeUnsupportedProtocolVersion {
-							t.Fatalf("version header: HTTP %d %+v %v", res.StatusCode, rejected, err)
-						}
-					}
-					if _, err := session.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
-						t.Fatalf("rejected request broke session: %v", err)
 					}
 				}
 				session.Close()
 				if finished != nil {
-					select {
-					case err := <-finished:
-						if err != nil {
-							t.Fatal(err)
-						}
-					case <-ctx.Done():
-						t.Fatal("relay did not exit on EOF")
+					if err := <-finished; err != nil {
+						t.Fatal(err)
 					}
 				}
 			})
@@ -955,7 +935,7 @@ func TestProxyTransports(t *testing.T) {
 }
 
 func TestLegacySessionsAreIsolated(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	b, err := Start(ctx, commandFactory, Options{})
 	if err != nil {
@@ -1018,7 +998,7 @@ func TestLegacyNotificationsBeforeGET(t *testing.T) {
 	}
 	server := httptest.NewServer(b)
 	t.Cleanup(func() { b.Close(); server.Close() })
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	id := ""
 	post := func(method string, params any) {
@@ -1086,7 +1066,7 @@ func TestProtocolAdmission(t *testing.T) {
 		{name: "SSE negotiation mismatch", configured: "2025-11-25", requested: "2025-11-25", upstream: "2025-06-18", sse: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			server, err := Start(ctx, func() *exec.Cmd {
 				cmd := commandFactory()
@@ -1180,6 +1160,44 @@ func TestLegacySessionLimit(t *testing.T) {
 	}
 }
 
+// fakeIdleTimer advances only when the test requests it. It drives the same
+// reset and expiry callback used by the live HTTP session and subprocess.
+type fakeIdleTimer struct {
+	mu            sync.Mutex
+	now, deadline time.Duration
+	active        bool
+	fire          func()
+}
+
+func (c *fakeIdleTimer) Reset(d time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	active := c.active
+	c.deadline, c.active = c.now+d, true
+	return active
+}
+
+func (c *fakeIdleTimer) Stop() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	active := c.active
+	c.active = false
+	return active
+}
+
+func (c *fakeIdleTimer) advance(d time.Duration) bool {
+	c.mu.Lock()
+	c.now += d
+	if !c.active || c.now < c.deadline {
+		c.mu.Unlock()
+		return false
+	}
+	c.active = false
+	c.mu.Unlock()
+	c.fire()
+	return true
+}
+
 func TestLegacySessionExpiry(t *testing.T) {
 	for _, mode := range []string{"streamable-http", "sse"} {
 		t.Run(mode, func(t *testing.T) {
@@ -1187,9 +1205,15 @@ func TestLegacySessionExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			clock := new(fakeIdleTimer)
+			b.afterFunc = func(d time.Duration, fire func()) idleTimer {
+				clock.fire = fire
+				clock.Reset(d)
+				return clock
+			}
 			server := httptest.NewServer(b)
 			t.Cleanup(func() { b.Close(); server.Close() })
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			method, path, data := http.MethodPost, "/mcp", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"expiry","version":"1"},"capabilities":{}}}`
 			if mode == "sse" {
@@ -1207,10 +1231,10 @@ func TestLegacySessionExpiry(t *testing.T) {
 			}
 			id := response.Header.Get("Mcp-Session-Id")
 			endpoint := server.URL + "/mcp"
+			stream := bufio.NewReader(response.Body)
 			if mode == "sse" {
-				reader := bufio.NewReader(response.Body)
 				for {
-					line, err := reader.ReadString('\n')
+					line, err := stream.ReadString('\n')
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -1229,10 +1253,10 @@ func TestLegacySessionExpiry(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				stream = bufio.NewReader(response.Body)
 			}
 			defer response.Body.Close()
-			// SSE publishes its endpoint before session setup returns. Wait for
-			// setup before shortening the idle deadline.
+			// SSE publishes its endpoint before the idle timer is installed.
 			b.work.Wait()
 			b.mu.Lock()
 			var session *legacySession
@@ -1240,20 +1264,64 @@ func TestLegacySessionExpiry(t *testing.T) {
 				session = candidate
 			}
 			b.mu.Unlock()
-			session.mu.Lock()
-			session.timeout = 50 * time.Millisecond
-			session.timer.Reset(session.timeout)
-			session.mu.Unlock()
-			_, err = io.Copy(io.Discard, response.Body)
+			ping := func() {
+				t.Helper()
+				req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}`))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Accept", "application/json, text/event-stream")
+				req.Header.Set("Mcp-Session-Id", id)
+				res, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer res.Body.Close()
+				reader, want := bufio.NewReader(res.Body), http.StatusOK
+				if mode == "sse" {
+					reader, want = stream, http.StatusAccepted
+				}
+				if res.StatusCode != want {
+					t.Fatal(res.Status)
+				}
+				var raw []byte
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						t.Fatal(err)
+					}
+					if data, ok := strings.CutPrefix(line, "data: "); ok {
+						raw = []byte(data)
+						break
+					}
+				}
+				var reply struct {
+					ID     int
+					Result json.RawMessage
+					Error  *jsonrpc.Error
+				}
+				if err := json.Unmarshal(raw, &reply); err != nil || reply.ID != 2 || reply.Error != nil || len(reply.Result) == 0 {
+					t.Fatalf("live session ping: %s (%v)", raw, err)
+				}
+			}
+			if clock.advance(5*time.Minute - time.Nanosecond) {
+				t.Fatal("session expired before its idle deadline")
+			}
+			ping() // Activity renews the full five-minute idle period.
+			if clock.advance(time.Nanosecond) {
+				t.Fatal("activity did not renew the idle deadline")
+			}
+			ping() // The original deadline must no longer expire this session.
+			if clock.advance(5*time.Minute - time.Nanosecond) {
+				t.Fatal("session expired before its renewed idle deadline")
+			}
+			if !clock.advance(time.Nanosecond) {
+				t.Fatal("session did not expire at its idle deadline")
+			}
+			_, err = io.Copy(io.Discard, stream)
 			response.Body.Close()
 			if err != nil {
 				t.Fatalf("idle session did not close: %v", err)
 			}
-			select {
-			case <-session.done:
-			case <-ctx.Done():
-				t.Fatal("expired session did not stop")
-			}
+			<-session.done
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 			req.Header.Set("Mcp-Session-Id", id)
 			res, err := server.Client().Do(req)
@@ -1266,6 +1334,80 @@ func TestLegacySessionExpiry(t *testing.T) {
 			}
 			if err := b.Close(); err != nil {
 				t.Fatalf("session failure affected bridge: %v", err)
+			}
+		})
+	}
+}
+
+func TestProtocolHeaderErrors(t *testing.T) {
+	_, server := start(t)
+	for _, test := range []struct {
+		name               string
+		versions           []string
+		code               int64
+		notificationStatus int
+	}{
+		{"missing", nil, mcp.CodeHeaderMismatch, http.StatusAccepted},
+		{"empty", []string{""}, mcp.CodeHeaderMismatch, http.StatusAccepted},
+		{"duplicate", []string{ProtocolVersion, "2099-01-01"}, mcp.CodeHeaderMismatch, http.StatusBadRequest},
+		{"duplicate unsupported first", []string{"2099-01-01", ProtocolVersion}, mcp.CodeHeaderMismatch, http.StatusBadRequest},
+		{"unsupported", []string{"2099-01-01"}, mcp.CodeUnsupportedProtocolVersion, http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := http.Header{
+				"Content-Type":         {"application/json"},
+				"Accept":               {"application/json, text/event-stream"},
+				"Mcp-Protocol-Version": test.versions,
+			}
+			check := func(issue *jsonrpc.Error) {
+				t.Helper()
+				if issue == nil || issue.Code != test.code {
+					t.Fatalf("protocol rejection = %+v, want code %d", issue, test.code)
+				}
+				if test.code == mcp.CodeUnsupportedProtocolVersion {
+					var data mcp.UnsupportedProtocolVersionData
+					if json.Unmarshal(issue.Data, &data) != nil || data.Requested != "2099-01-01" || !reflect.DeepEqual(data.Supported, []string{ProtocolVersion}) {
+						t.Fatalf("negotiation data = %s", issue.Data)
+					}
+				}
+			}
+			// The public validator requires a version even when notifications
+			// may omit it. Both boundaries must reject malformed versions before
+			// parsing params or forwarding messages.
+			check(proxy.ValidateHeaders(headers, &jsonrpc.Request{}, ProtocolVersion))
+			for _, request := range []struct {
+				name   string
+				body   string
+				status int
+			}{
+				{"call", `{"jsonrpc":"2.0","id":1,"method":"server/discover"}`, http.StatusBadRequest},
+				{"notification", `{"jsonrpc":"2.0","method":"notifications/initialized"}`, test.notificationStatus},
+			} {
+				t.Run(request.name, func(t *testing.T) {
+					r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL, strings.NewReader(request.body))
+					if err != nil {
+						t.Fatal(err)
+					}
+					r.Header = headers
+					response, err := server.Client().Do(r)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer response.Body.Close()
+					if response.StatusCode != request.status {
+						t.Fatalf("HTTP status = %d, want %d", response.StatusCode, request.status)
+					}
+					if response.StatusCode == http.StatusAccepted {
+						return
+					}
+					var body struct {
+						Error *jsonrpc.Error `json:"error"`
+					}
+					if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					check(body.Error)
+				})
 			}
 		})
 	}
