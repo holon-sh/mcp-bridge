@@ -43,10 +43,6 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, jsonrpc.ID{}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "expected a request or notification"})
 		return
 	}
-	if r.Header.Get("Last-Event-ID") != "" || r.Header.Get("Mcp-Session-Id") != "" {
-		WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "transport sessions and stream resumption are unsupported"})
-		return
-	}
 	if req.Method == "notifications/cancelled" {
 		WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "HTTP requests are cancelled by closing their response stream"})
 		return
@@ -55,34 +51,30 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, req.ID, issue)
 		return
 	}
-	if req.IsCall() {
-		if req.Method == "initialize" {
-			var params mcp.InitializeParams
-			_ = json.Unmarshal(req.Params, &params)
-			WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
-			return
-		}
-		if issue := proxy.ValidateHeaders(r.Header, req, b.version); issue != nil {
-			WriteError(w, 400, req.ID, issue)
-			return
-		}
-		if req.Method == "tools/call" {
-			arguments, err := proxy.ToolHeaderArguments(r.Context(), req.Params, b.request)
-			if err == nil {
-				err = proxy.ValidateArgumentHeaders(r.Header, arguments)
-			}
-			if err != nil {
-				writeHeaderError(w, req.ID, err)
-				return
-			}
-		}
-	} else {
+	if !req.IsCall() {
 		if err := b.write(r.Context(), req); err != nil {
 			http.Error(w, "MCP process unavailable", 503)
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
 		return
+	}
+	if req.Method == "initialize" {
+		var params mcp.InitializeParams
+		_ = json.Unmarshal(req.Params, &params)
+		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
+		return
+	}
+	if issue := proxy.ValidateHeaders(r.Header, req, b.version); issue != nil {
+		WriteError(w, 400, req.ID, issue)
+		return
+	}
+	if req.Method == "tools/call" {
+		arguments, err := proxy.ToolHeaderArguments(r.Context(), req.Params, b.request)
+		if err = errors.Join(err, proxy.ValidateArgumentHeaders(r.Header, arguments)); err != nil {
+			writeHeaderError(w, req.ID, err)
+			return
+		}
 	}
 	c, err := b.begin(r.Context(), req)
 	if err != nil {
@@ -101,10 +93,8 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		w.Header().Set("X-Accel-Buffering", "no")
 		return writeEvent(w, ": connected\n\n")
 	}
-	if req.Method == "subscriptions/listen" {
-		if startStream() != nil {
-			return
-		}
+	if req.Method == "subscriptions/listen" && startStream() != nil {
+		return
 	}
 	for {
 		wait, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -117,13 +107,11 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 			continue
 		}
 		if err != nil {
-			if r.Context().Err() == nil {
-				if !streaming {
-					WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "MCP process stopped"})
-				} else {
-					data, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: req.ID, Error: &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "MCP process stopped"}})
-					_ = writeEvent(w, "event: message\ndata: "+string(data)+"\n\n")
-				}
+			if !streaming {
+				WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "MCP process stopped"})
+			} else {
+				data, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: req.ID, Error: &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "MCP process stopped"}})
+				_ = writeEvent(w, "event: message\ndata: "+string(data)+"\n\n")
 			}
 			return
 		}
@@ -137,21 +125,13 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 			result["supportedVersions"], _ = json.Marshal([]string{b.version})
 			response.Result, _ = json.Marshal(result)
 		}
-		data, err := jsonrpc.EncodeMessage(message)
-		if err != nil {
-			return
-		}
+		data, _ := jsonrpc.EncodeMessage(message)
 		if isResponse && !streaming {
 			w.Header().Set("Content-Type", "application/json")
 			status := http.StatusOK
 			var wire *jsonrpc.Error
 			if errors.As(response.Error, &wire) {
-				switch wire.Code {
-				case jsonrpc.CodeMethodNotFound:
-					status = 404
-				case mcp.CodeHeaderMismatch, mcp.CodeUnsupportedProtocolVersion, jsonrpc.CodeInvalidParams:
-					status = 400
-				}
+				status = errorStatus(wire.Code, status)
 			}
 			w.WriteHeader(status)
 			_, _ = w.Write(data)
@@ -160,10 +140,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		if startStream() != nil || writeEvent(w, "event: message\ndata: "+string(data)+"\n\n") != nil {
 			return
 		}
-		if isResponse {
-			return
-		}
-		if notification, ok := message.(*jsonrpc.Request); ok && notification.Method == "notifications/cancelled" {
+		if isResponse || message.(*jsonrpc.Request).Method == "notifications/cancelled" {
 			return
 		}
 	}
@@ -200,10 +177,8 @@ func writeEvent(w http.ResponseWriter, value string) error {
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
-	if _, err := io.WriteString(w, value); err != nil {
-		return err
-	}
-	return controller.Flush()
+	_, err := io.WriteString(w, value)
+	return errors.Join(err, controller.Flush())
 }
 
 // WriteError sends a JSON-RPC error response with the supplied HTTP status and
@@ -214,6 +189,16 @@ func WriteError(w http.ResponseWriter, status int, id jsonrpc.ID, issue *jsonrpc
 	w.WriteHeader(status)
 	encoded, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: id, Error: issue})
 	_, _ = w.Write(encoded)
+}
+
+func errorStatus(code int64, fallback int) int {
+	switch code {
+	case jsonrpc.CodeMethodNotFound:
+		return http.StatusNotFound
+	case mcp.CodeHeaderMismatch, mcp.CodeUnsupportedProtocolVersion, jsonrpc.CodeInvalidParams:
+		return http.StatusBadRequest
+	}
+	return fallback
 }
 
 func writeHeaderError(w http.ResponseWriter, id jsonrpc.ID, err error) {

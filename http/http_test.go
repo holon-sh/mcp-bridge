@@ -81,7 +81,7 @@ func TestProcess(t *testing.T) {
 		var result any
 		switch req.Method {
 		case "server/discover":
-			result = map[string]any{"supportedVersions": []string{ProtocolVersion}, "capabilities": map[string]any{"extensions": map[string]any{"io.modelcontextprotocol/tasks": map[string]any{}}}}
+			result = map[string]any{"supportedVersions": []string{cmp.Or(os.Getenv("BRIDGE_TEST_VERSION"), ProtocolVersion)}, "capabilities": map[string]any{"extensions": map[string]any{"io.modelcontextprotocol/tasks": map[string]any{}}}}
 		case "tools/list":
 			result = map[string]any{"tools": []any{
 				map[string]any{"name": "echo", "inputSchema": map[string]any{"type": "object"}},
@@ -384,12 +384,17 @@ func TestSubscriptions(t *testing.T) {
 func TestValidation(t *testing.T) {
 	b, _ := start(t)
 	for _, test := range []struct {
-		name, tool string
-		arguments  map[string]any
-		headers    http.Header
-		body       string
-		status     int
+		name, tool, method string
+		arguments          map[string]any
+		headers            http.Header
+		body               string
+		status             int
 	}{
+		{name: "GET", method: http.MethodGet, status: 405},
+		{name: "JSON-only Accept", headers: http.Header{"Accept": {"application/json"}}, status: 406},
+		{name: "stream-only Accept", headers: http.Header{"Accept": {"text/event-stream"}}, status: 406},
+		{name: "client response", body: `{"jsonrpc":"2.0","id":1,"result":{}}`, status: 400},
+		{name: "cancellation notification", body: `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`, status: 400},
 		{name: "wrong method", headers: http.Header{"Mcp-Method": {"wrong"}}, status: 400},
 		{name: "wrong name", headers: http.Header{"Mcp-Name": {"wrong"}}, status: 400},
 		{name: "missing argument header", arguments: map[string]any{"tenant": "tenant-a"}, status: 400},
@@ -406,6 +411,7 @@ func TestValidation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			req := testutil.Request(t, "tools/call", map[string]any{"name": cmp.Or(test.tool, "headers"), "arguments": test.arguments})
+			req.Method = cmp.Or(test.method, req.Method)
 			for name, values := range test.headers {
 				req.Header[name] = values
 			}
@@ -1052,6 +1058,17 @@ func TestLegacyNotificationsBeforeGET(t *testing.T) {
 		}
 	}
 	t.Fatalf("early notifications lost: %v %v", seen, scanner.Err())
+}
+
+func TestStartRequiresDiscoveredVersion(t *testing.T) {
+	_, err := Start(t.Context(), func() *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestProcess$")
+		cmd.Env = append(os.Environ(), "BRIDGE_TEST_PROCESS=raw", "BRIDGE_TEST_VERSION=2099-01-01")
+		return cmd
+	}, Options{ProtocolVersion: ProtocolVersion})
+	if err == nil {
+		t.Fatal("started a process that does not support the configured version")
+	}
 }
 
 func TestProtocolAdmission(t *testing.T) {

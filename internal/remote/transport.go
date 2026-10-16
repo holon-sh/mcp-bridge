@@ -2,6 +2,7 @@ package remote
 
 import (
 	"cmp"
+	"mime"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -11,17 +12,18 @@ type RoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f RoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func Streamable(t mcp.StreamableClientTransport, maxBytes int, prepare func(*http.Request), isEventStream func(string) bool) *mcp.StreamableClientTransport {
+func Streamable(t mcp.StreamableClientTransport, maxBytes int, roundTrip func(http.RoundTripper, *http.Request) (*http.Response, error)) *mcp.StreamableClientTransport {
 	copyClient := *cmp.Or(t.HTTPClient, http.DefaultClient)
 	base := cmp.Or(copyClient.Transport, http.DefaultTransport)
 	copyClient.Transport = RoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		r = r.Clone(r.Context())
-		prepare(r)
-		response, err := base.RoundTrip(r)
-		if err == nil && !isEventStream(response.Header.Get("Content-Type")) {
+		response, err := roundTrip(base, r.Clone(r.Context()))
+		if err != nil {
+			return nil, err
+		}
+		if media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type")); media != "text/event-stream" {
 			response.Body = http.MaxBytesReader(nil, response.Body, int64(maxBytes))
 		}
-		return response, err
+		return response, nil
 	})
 	t.HTTPClient = &copyClient
 	t.DisableStandaloneSSE = true

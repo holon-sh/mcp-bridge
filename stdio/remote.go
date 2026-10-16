@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -57,18 +56,16 @@ func connectRemote(ctx context.Context, transport mcp.Transport) (mcp.Connection
 	switch t := transport.(type) {
 	case *mcp.StreamableClientTransport:
 		r.endpoint = t.Endpoint
-		copyTransport := remote.Streamable(*t, proxy.MaxMessageBytes, func(req *http.Request) {
+		copyTransport := remote.Streamable(*t, proxy.MaxMessageBytes, func(base http.RoundTripper, req *http.Request) (*http.Response, error) {
 			r.mu.Lock()
 			version := r.version
 			r.mu.Unlock()
-			if version != "" && req.Header.Get("Mcp-Protocol-Version") == "" {
+			if version != "" {
 				req.Header.Set("Mcp-Protocol-Version", version)
 			}
 			headers, _ := req.Context().Value(remoteHeadersKey{}).(http.Header)
 			maps.Copy(req.Header, headers)
-		}, func(contentType string) bool {
-			media, _, _ := mime.ParseMediaType(contentType)
-			return media == "text/event-stream"
+			return base.RoundTrip(req)
 		})
 		r.client = copyTransport.HTTPClient
 		transport = copyTransport
@@ -109,7 +106,7 @@ func (r *remoteConnection) read() {
 			}
 			cancel = r.calls[response.ID]
 			delete(r.calls, response.ID)
-			initialize := response.ID == r.initialize && r.initialize.IsValid()
+			initialize := response.ID == r.initialize
 			if initialize {
 				r.initialize = jsonrpc.ID{}
 			}
@@ -155,7 +152,7 @@ func (r *remoteConnection) listen() {
 	if res.StatusCode == http.StatusMethodNotAllowed {
 		return
 	}
-	if res.StatusCode != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+	if !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
 		r.deliver(nil, fmt.Errorf("MCP notification stream: HTTP %d", res.StatusCode))
 		return
 	}
@@ -198,10 +195,10 @@ func (r *remoteConnection) Write(ctx context.Context, msg jsonrpc.Message) error
 		id, _ := jsonrpc.MakeID(params.RequestID)
 		cancel := r.calls[id]
 		delete(r.calls, id)
-		current := r.client != nil && !proxy.IsLegacyVersion(r.version)
+		notify := r.notifiesCancellation()
 		r.mu.Unlock()
 		var err error
-		if !current {
+		if notify {
 			err = r.Connection.Write(ctx, msg)
 		}
 		if cancel != nil {
@@ -257,10 +254,6 @@ func (r *remoteConnection) request(ctx context.Context, method string, params js
 	id, _ := jsonrpc.MakeID(rand.Text())
 	response := make(chan *jsonrpc.Response, 1)
 	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return nil, mcp.ErrConnectionClosed
-	}
 	r.queries[id] = response
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.queries, id); r.mu.Unlock() }()
@@ -283,12 +276,12 @@ func (r *remoteConnection) Close() error {
 		r.closed = true
 		calls := r.calls
 		r.calls = nil
-		legacy := r.client == nil || proxy.IsLegacyVersion(r.version)
+		notify := r.notifiesCancellation()
 		r.mu.Unlock()
 		ctx, stop := context.WithTimeout(context.WithoutCancel(r.ctx), 5*time.Second)
 		defer stop()
 		for id, cancel := range calls {
-			if legacy {
+			if notify {
 				params, _ := json.Marshal(&mcp.CancelledParams{RequestID: id.Raw()})
 				_ = r.Connection.Write(ctx, &jsonrpc.Request{Method: "notifications/cancelled", Params: params})
 			}
@@ -300,6 +293,10 @@ func (r *remoteConnection) Close() error {
 		r.writes.Wait()
 	})
 	return nil
+}
+
+func (r *remoteConnection) notifiesCancellation() bool {
+	return r.client == nil || proxy.IsLegacyVersion(r.version)
 }
 
 func readEvents(reader io.Reader, deliver func(jsonrpc.Message) error) error {

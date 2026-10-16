@@ -23,24 +23,20 @@ func Relay(ctx context.Context, upstream, downstream mcp.Connection) error {
 	pump := func(from, to mcp.Connection, fromUpstream bool) error {
 		for {
 			msg, err := from.Read(ctx)
-			if errors.Is(err, io.EOF) {
-				if !fromUpstream {
-					return nil
-				}
-				err = errors.New("MCP upstream closed")
+			switch {
+			case errors.Is(err, io.EOF) && !fromUpstream:
+				return nil
+			case errors.Is(err, io.EOF):
+				return errors.New("MCP upstream closed")
+			case err != nil:
+				return err
 			}
-			if err == nil {
-				var data []byte
-				data, err = jsonrpc.EncodeMessage(msg)
-				if err == nil && len(data) > MaxMessageBytes {
-					err = errors.New("MCP message limit exceeded")
-				}
+			if data, _ := jsonrpc.EncodeMessage(msg); len(data) > MaxMessageBytes {
+				return errors.New("MCP message limit exceeded")
 			}
-			if err == nil {
-				err = to.Write(ctx, msg)
-				if fromUpstream && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, mcp.ErrConnectionClosed)) {
-					return nil
-				}
+			err = to.Write(ctx, msg)
+			if fromUpstream && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, mcp.ErrConnectionClosed)) {
+				return nil
 			}
 			if err != nil {
 				return err
