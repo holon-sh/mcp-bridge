@@ -72,12 +72,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 				err = proxy.ValidateArgumentHeaders(r.Header, arguments)
 			}
 			if err != nil {
-				var wire *jsonrpc.Error
-				if errors.As(err, &wire) {
-					WriteError(w, 400, req.ID, wire)
-				} else {
-					WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "could not validate upstream tool headers"})
-				}
+				writeHeaderError(w, req.ID, err)
 				return
 			}
 		}
@@ -219,6 +214,15 @@ func WriteError(w http.ResponseWriter, status int, id jsonrpc.ID, issue *jsonrpc
 	w.WriteHeader(status)
 	encoded, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: id, Error: issue})
 	_, _ = w.Write(encoded)
+}
+
+func writeHeaderError(w http.ResponseWriter, id jsonrpc.ID, err error) {
+	var wire *jsonrpc.Error
+	if errors.As(err, &wire) {
+		WriteError(w, 400, id, wire)
+		return
+	}
+	WriteError(w, 502, id, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "could not read upstream tool headers"})
 }
 
 func accepts(headers http.Header, target string) bool {

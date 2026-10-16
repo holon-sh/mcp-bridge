@@ -76,11 +76,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 	go b.read()
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: mcp.Meta{
-		mcp.MetaKeyProtocolVersion:    version,
-		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.1.0"},
-		mcp.MetaKeyClientCapabilities: &mcp.ClientCapabilities{},
-	}})
+	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(version)})
 	result, err := b.request(probeCtx, "server/discover", params)
 	if err == nil {
 		var discovered mcp.DiscoverResult
@@ -95,6 +91,14 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 		return nil, fmt.Errorf("discover MCP server: %w", err)
 	}
 	return b, nil
+}
+
+func clientMeta(version string) mcp.Meta {
+	return mcp.Meta{
+		mcp.MetaKeyProtocolVersion:    version,
+		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.1.0"},
+		mcp.MetaKeyClientCapabilities: map[string]any{},
+	}
 }
 
 func (b *currentBridge) stop(err error) {
