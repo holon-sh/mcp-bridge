@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/hughhan1/mcp-bridge/internal/remote"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -37,26 +38,22 @@ func readRemoteLimited(reader io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-type replayedRemoteBody struct {
-	io.Reader
-	io.Closer
-}
-
 func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
-	candidate := r.Method == http.MethodPost && r.Header.Get("Mcp-Protocol-Version") == CurrentVersion &&
-		slices.Contains([]string{"tools/list", "tools/call"}, r.Header.Get("Mcp-Method"))
-	if candidate && r.GetBody == nil && r.Body != nil {
-		body, err := readRemoteLimited(r.Body)
+	candidate := slices.Contains([]string{"tools/list", "tools/call"}, r.Header.Get("Mcp-Method")) && r.Body != nil
+	var sent []byte
+	if candidate {
+		var err error
+		sent, err = readRemoteLimited(r.Body)
 		_ = r.Body.Close()
 		if err != nil {
 			return nil, err
 		}
 		r = r.Clone(r.Context())
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+		r.Body = io.NopCloser(bytes.NewReader(sent))
+		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(sent)), nil }
 	}
 	response, err := t.base.RoundTrip(r)
-	if err != nil || response.StatusCode != http.StatusBadRequest || !candidate || r.GetBody == nil {
+	if err != nil || response.StatusCode != http.StatusBadRequest || !candidate {
 		return response, err
 	}
 	originalBody := response.Body
@@ -65,25 +62,16 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		_ = originalBody.Close()
 		return nil, err
 	}
-	response.Body = &replayedRemoteBody{Reader: io.MultiReader(bytes.NewReader(body), originalBody), Closer: originalBody}
-	if len(body) > mcp.DefaultMaxLineLength {
-		return response, nil
-	}
+	response.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
 	message, _ := jsonrpc.DecodeMessage(body)
 	rejected, ok := message.(*jsonrpc.Response)
 	if !ok || !errors.Is(rejected.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) {
 		return response, nil
 	}
-	replay, err := r.GetBody()
-	if err != nil {
-		return nil, err
-	}
-	defer replay.Close()
-	body, err = readRemoteLimited(replay)
-	if err != nil {
-		return nil, err
-	}
-	message, _ = jsonrpc.DecodeMessage(body)
+	message, _ = jsonrpc.DecodeMessage(sent)
 	request, ok := message.(*jsonrpc.Request)
 	if !ok || rejected.ID != request.ID ||
 		ValidateHeaders(r.Header, request, CurrentVersion) != nil {
@@ -105,13 +93,8 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 	}
 	params["_meta"], _ = json.Marshal(meta)
 	raw, _ := json.Marshal(params)
-	version := ""
-	for _, supported := range mcp.SupportedProtocolVersions() {
-		if supported < CurrentVersion {
-			version = supported
-			break
-		}
-	}
+	versions := mcp.SupportedProtocolVersions()
+	version := versions[slices.IndexFunc(versions, IsLegacyVersion)]
 	client := mcp.NewClient(&info, &mcp.ClientOptions{
 		Capabilities: &mcp.ClientCapabilities{}, MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
 		Logger: slog.New(slog.DiscardHandler),
@@ -121,16 +104,29 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 		lower := strings.ToLower(key)
 		return strings.HasPrefix(lower, "mcp-") || slices.Contains([]string{"last-event-id", "content-length", "accept", "accept-encoding", "content-type"}, lower)
 	})
+	var failure atomic.Pointer[http.Response]
 	session, err := client.Connect(r.Context(), remote.Streamable(mcp.StreamableClientTransport{
 		Endpoint: r.URL.String(),
 		HTTPClient: &http.Client{
 			Transport:     t.base,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-	}, mcp.DefaultMaxLineLength, func(r *http.Request) {
-		maps.Copy(r.Header, headers.Clone())
-	}, func(contentType string) bool { return strings.HasPrefix(contentType, "text/event-stream") }), &mcp.ClientSessionOptions{ProtocolVersion: version})
+	}, mcp.DefaultMaxLineLength, func(base http.RoundTripper, next *http.Request) (*http.Response, error) {
+		maps.Copy(next.Header, headers.Clone())
+		response, err := base.RoundTrip(next)
+		if err != nil || next.Method != http.MethodPost || response.StatusCode < 400 || r.Context().Err() != nil {
+			return response, err
+		}
+		response.Header.Del("Set-Cookie")
+		response.Header.Del("Mcp-Session-Id")
+		response.Request = r
+		failure.Store(response)
+		return nil, errors.New(response.Status)
+	}), &mcp.ClientSessionOptions{ProtocolVersion: version})
 	if err != nil {
+		if response := failure.Load(); response != nil {
+			return response, nil
+		}
 		return nil, err
 	}
 	defer session.Close()
@@ -152,6 +148,9 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 	}
 	reply := &jsonrpc.Response{ID: request.ID}
 	if err != nil {
+		if response := failure.Load(); response != nil {
+			return response, nil
+		}
 		var wire *jsonrpc.Error
 		if !errors.As(err, &wire) {
 			return nil, err
@@ -165,10 +164,7 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 		fields["cacheScope"] = json.RawMessage(`"private"`)
 		reply.Result, _ = json.Marshal(fields)
 	}
-	body, err := jsonrpc.EncodeMessage(reply)
-	if err != nil {
-		return nil, err
-	}
+	body, _ := jsonrpc.EncodeMessage(reply)
 	return &http.Response{
 		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}, "Cache-Control": {"no-store"}},
 		Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: r,

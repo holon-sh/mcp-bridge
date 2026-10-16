@@ -1,6 +1,7 @@
 package mcphttp
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -69,9 +70,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 		return nil, err
 	}
 	pinned := version != ""
-	if version == "" {
-		version = ProtocolVersion
-	}
+	version = cmp.Or(version, ProtocolVersion)
 	b := &currentBridge{conn: conn, version: version, pinned: pinned, log: conn.log, pending: map[string]*call{}, stopping: make(chan struct{}), done: make(chan struct{})}
 	go b.read()
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -128,14 +127,9 @@ func (b *currentBridge) write(ctx context.Context, msg jsonrpc.Message) error {
 }
 
 func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request) (*call, error) {
-	var params map[string]json.RawMessage
-	if err := json.Unmarshal(req.Params, &params); err != nil || params == nil {
-		return nil, errors.New("request params must be an object")
-	}
-	var meta map[string]json.RawMessage
-	if err := json.Unmarshal(params["_meta"], &meta); err != nil || meta == nil {
-		return nil, errors.New("request metadata is required")
-	}
+	var params, meta map[string]json.RawMessage
+	_ = json.Unmarshal(req.Params, &params)
+	_ = json.Unmarshal(params["_meta"], &meta)
 	c := &call{id: rand.Text(), original: req.ID, progress: meta["progressToken"], messages: make(chan delivery, 8)}
 	if c.progress != nil {
 		meta["progressToken"], _ = json.Marshal(c.id)
@@ -236,11 +230,8 @@ func (b *currentBridge) route(msg jsonrpc.Message) {
 			c.completed = true
 		}
 	case *jsonrpc.Request:
-		var params map[string]json.RawMessage
-		if json.Unmarshal(message.Params, &params) != nil {
-			return
-		}
-		var meta map[string]json.RawMessage
+		var params, meta map[string]json.RawMessage
+		_ = json.Unmarshal(message.Params, &params)
 		_ = json.Unmarshal(params["_meta"], &meta)
 		var id string
 		switch message.Method {
@@ -267,18 +258,13 @@ func (b *currentBridge) route(msg jsonrpc.Message) {
 				params["_meta"], _ = json.Marshal(meta)
 			}
 		}
-		if c != nil {
-			message.Params, _ = json.Marshal(params)
-		}
+		message.Params, _ = json.Marshal(params)
 	}
 	if c == nil {
 		_, _ = fmt.Fprintln(b.log, "mcp-bridge: discarded uncorrelated upstream message")
 		return
 	}
-	data, err := jsonrpc.EncodeMessage(msg)
-	if err != nil {
-		return
-	}
+	data, _ := jsonrpc.EncodeMessage(msg)
 	if b.queued+len(data) > maxQueuedBytes {
 		go b.stop(errors.New("MCP output buffer limit exceeded"))
 		return

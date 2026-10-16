@@ -108,23 +108,20 @@ func (b *legacyBridge) connect(ctx context.Context, remote *mcp.StreamableClient
 				return nil, err
 			}
 			switch method {
-			case "notifications/resources/updated", "notifications/progress":
-				if method == "notifications/resources/updated" {
-					id, _ := jsonrpc.MakeID(req.GetParams().GetMeta()[mcp.MetaKeySubscriptionID])
-					b.subMu.Lock()
-					sub := b.listens[id]
-					active := sub != nil && sub.acknowledged && sub == b.subscriptions[req.GetParams().(*mcp.ResourceUpdatedNotificationParams).URI]
-					b.subMu.Unlock()
-					if !active {
-						return result, nil
-					}
+			case "notifications/resources/updated":
+				id, _ := jsonrpc.MakeID(req.GetParams().GetMeta()[mcp.MetaKeySubscriptionID])
+				b.subMu.Lock()
+				sub := b.listens[id]
+				active := sub != nil && sub == b.subscriptions[req.GetParams().(*mcp.ResourceUpdatedNotificationParams).URI]
+				b.subMu.Unlock()
+				if !active {
+					return result, nil
 				}
+				fallthrough
+			case "notifications/progress":
 				delete(req.GetParams().GetMeta(), mcp.MetaKeySubscriptionID)
-				raw, err := json.Marshal(req.GetParams())
-				if err == nil {
-					err = b.local.Write(ctx, &jsonrpc.Request{Method: method, Params: raw})
-				}
-				if err != nil {
+				raw, _ := json.Marshal(req.GetParams())
+				if err := b.local.Write(ctx, &jsonrpc.Request{Method: method, Params: raw}); err != nil {
 					b.cancel(err)
 				}
 			}
@@ -237,9 +234,7 @@ func (u *legacyUpstream) Write(ctx context.Context, msg jsonrpc.Message) error {
 		}
 		if req.Method == "subscriptions/listen" {
 			var params mcp.SubscriptionsListenParams
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				return err
-			}
+			_ = json.Unmarshal(req.Params, &params)
 			u.bridge.subMu.Lock()
 			// ClientSession.Subscribe opens one stream for the URI registered by
 			// subscribe; subscriptionOps holds it in place until acknowledgement.

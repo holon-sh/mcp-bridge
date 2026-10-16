@@ -1,6 +1,7 @@
 package mcphttp
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -46,15 +47,9 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*processConnection, error
 		return nil, err
 	}
 	cmd.Stdin, cmd.Stdout = in, out
-	logger := cmd.Stderr
-	if logger == nil {
-		logger = io.Discard
-	}
-	logger = &lockedWriter{Writer: logger}
+	logger := &lockedWriter{Writer: cmp.Or(cmd.Stderr, io.Discard)}
 	cmd.Stderr = logger
-	if cmd.WaitDelay == 0 || cmd.WaitDelay > shutdownGrace {
-		cmd.WaitDelay = shutdownGrace
-	}
+	cmd.WaitDelay = min(cmp.Or(cmd.WaitDelay, shutdownGrace), shutdownGrace)
 	if err := cmd.Start(); err != nil {
 		in.Close()
 		input.Close()
@@ -74,10 +69,9 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*processConnection, error
 func (p *processConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	deadline := time.Now().Add(5 * time.Second)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
 	if err := p.stdin.SetWriteDeadline(deadline); err != nil {
 		return err
 	}

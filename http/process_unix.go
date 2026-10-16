@@ -3,6 +3,7 @@
 package mcphttp
 
 import (
+	"cmp"
 	"errors"
 	"os/exec"
 	"syscall"
@@ -12,10 +13,7 @@ func prepareProcess(cmd *exec.Cmd) error {
 	if cmd.SysProcAttr != nil && (cmd.SysProcAttr.Pgid != 0 || cmd.SysProcAttr.Setsid) {
 		return errors.New("bridge requires its own process group")
 	}
-	attrs := syscall.SysProcAttr{}
-	if cmd.SysProcAttr != nil {
-		attrs = *cmd.SysProcAttr
-	}
+	attrs := *cmp.Or(cmd.SysProcAttr, &syscall.SysProcAttr{})
 	attrs.Setpgid = true
 	cmd.SysProcAttr = &attrs
 	return nil

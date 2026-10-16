@@ -31,6 +31,7 @@ func TestValidateHeaders(t *testing.T) {
 		{name: "missing version header", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Protocol-Version": nil}},
 		{name: "metadata version", method: "tools/list", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`},
 		{name: "client name", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`},
+		{name: "malformed client info", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1","icons":1}`, capabilities) + `}`},
 		{name: "client version", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client"}`, capabilities) + `}`},
 		{name: "client capabilities", method: "tools/list", params: `{` + meta(version, info) + `}`},
 		{name: "duplicate method", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}},

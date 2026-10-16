@@ -1,10 +1,13 @@
 package proxy_test
 
 import (
+	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -289,21 +292,15 @@ func TestLegacyCancellationDoesNotReplayTool(t *testing.T) {
 func TestLegacyFailuresDoNotReplayTools(t *testing.T) {
 	for _, tc := range []struct {
 		name, version, wantError string
-		status                   int
 		executions               int32
 	}{
 		{name: "current negotiated version", version: proxy.CurrentVersion, wantError: "upstream did not negotiate a legacy MCP protocol"},
-		{name: "HTTP failure after dispatch", version: "2025-06-18", status: 500, executions: 1},
 		{name: "RPC failure after dispatch", version: "2025-06-18", executions: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var executions atomic.Int32
 			transport, endpoint := legacyTestTransport(t, legacyTestProvider(tc.version, func(w http.ResponseWriter, _ *http.Request, req *jsonrpc.Request) {
 				executions.Add(1)
-				if tc.status != 0 {
-					http.Error(w, "transport failure", tc.status)
-					return
-				}
 				mcphttp.WriteError(w, http.StatusOK, req.ID, &jsonrpc.Error{
 					Code: -32603, Message: "tool execution failed", Data: json.RawMessage(`{"detail":"preserved"}`),
 				})
@@ -331,11 +328,56 @@ func TestLegacyFailuresDoNotReplayTools(t *testing.T) {
 					Data struct{ Detail string }
 				}
 			}
-			if json.NewDecoder(response.Body).Decode(&reply) != nil || response.StatusCode != 200 || reply.ID != 1 || reply.Error == nil {
+			if json.NewDecoder(response.Body).Decode(&reply) != nil || response.StatusCode != 200 || reply.ID != 1 || reply.Error == nil || reply.Error.Code != -32603 || reply.Error.Data.Detail != "preserved" {
 				t.Fatalf("lost RPC failure: %+v", reply)
 			}
-			if tc.status == 0 && (reply.Error.Code != -32603 || reply.Error.Data.Detail != "preserved") {
-				t.Fatal("lost RPC error data")
+		})
+	}
+}
+
+func TestLegacyHTTPRejections(t *testing.T) {
+	for _, tc := range []struct {
+		stage, body string
+		status      int
+	}{
+		{stage: "initialize", status: 401, body: `{"error":"invalid_token"}`},
+		{stage: "tools/call", status: 503, body: strings.Repeat("unavailable", mcp.DefaultMaxLineLength/10)},
+		{stage: "tools/call", status: 307},
+	} {
+		t.Run(fmt.Sprintf("%s/%d", tc.stage, tc.status), func(t *testing.T) {
+			var calls atomic.Int32
+			provider := legacyTestProvider("2025-06-18", func(http.ResponseWriter, *http.Request, *jsonrpc.Request) { calls.Add(1) })
+			transport, endpoint := legacyTestTransport(t, func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				message, _ := jsonrpc.DecodeMessage(body)
+				if request, ok := message.(*jsonrpc.Request); !ok || request.Method != tc.stage || r.Header.Get("Mcp-Protocol-Version") == proxy.CurrentVersion {
+					provider.ServeHTTP(w, r)
+					return
+				}
+				calls.Add(1)
+				for key, value := range map[string]string{"WWW-Authenticate": "Bearer", "Retry-After": "10", "Location": "/moved", "Set-Cookie": "session=1", "Mcp-Session-Id": "1"} {
+					w.Header().Set(key, value)
+				}
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			})
+			method := cmp.Or(strings.TrimPrefix(tc.stage, "initialize"), "tools/call")
+			response, err := transport.RoundTrip(legacyRequest(t, endpoint, method, "alice"))
+			if tc.status < 400 {
+				if err == nil {
+					t.Fatalf("returned redirect %d", response.StatusCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			body, _ := io.ReadAll(response.Body)
+			if response.StatusCode != tc.status || string(body) != tc.body || response.Header.Get("Retry-After") != "10" || response.Header.Get("WWW-Authenticate") != "Bearer" ||
+				response.Header.Get("Set-Cookie") != "" || response.Header.Get("Mcp-Session-Id") != "" || calls.Load() != 1 {
+				t.Fatalf("rejection lost or replayed: status %d, body %.40s, headers %v, calls %d", response.StatusCode, body, response.Header, calls.Load())
 			}
 		})
 	}

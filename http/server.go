@@ -221,10 +221,8 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, 400, req.ID, issue)
 			return
 		}
-		if b.version != "" {
-			setBody(r, req)
-			r.Header.Set("Mcp-Protocol-Version", b.version)
-		}
+		setBody(r, req)
+		r.Header.Set("Mcp-Protocol-Version", b.version)
 		id := rand.Text()
 		t := &mcp.StreamableServerTransport{SessionID: id, EventStore: b.legacyEvents}
 		s, err := b.newSession(id, t)
@@ -248,11 +246,7 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var rpcErr *jsonrpc.Error
 		if req, ok := msg.(*jsonrpc.Request); ok && errors.As(err, &rpcErr) {
-			status := http.StatusBadRequest
-			if rpcErr.Code == jsonrpc.CodeMethodNotFound {
-				status = http.StatusNotFound
-			}
-			WriteError(w, status, req.ID, rpcErr)
+			WriteError(w, errorStatus(rpcErr.Code, http.StatusBadRequest), req.ID, rpcErr)
 			return
 		}
 		b.stop(err)
@@ -267,7 +261,7 @@ func prepareInitialize(req *jsonrpc.Request, version string) *jsonrpc.Error {
 	if !req.IsCall() || json.Unmarshal(req.Params, &params) != nil || !proxy.IsLegacyVersion(params.ProtocolVersion) {
 		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "initialize requires a supported legacy protocol"}
 	}
-	if version != "" && params.ProtocolVersion != version {
+	if version != "" {
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(req.Params, &fields)
 		fields["protocolVersion"], _ = json.Marshal(version)
@@ -377,7 +371,7 @@ func (c *activeConnection) Write(ctx context.Context, msg jsonrpc.Message) error
 	if response, ok := msg.(*jsonrpc.Response); ok {
 		c.mu.Lock()
 		cancelled := c.pending[response.ID]
-		initialize := response.ID == c.initialize && c.initialize.IsValid()
+		initialize := response.ID == c.initialize
 		if initialize {
 			c.initialize = jsonrpc.ID{}
 		}
@@ -413,11 +407,9 @@ func (s *legacySession) touch() {
 func (s *legacySession) close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.closing {
-		s.closing = true
-		s.timer.Stop()
-		s.cancel()
-	}
+	s.closing = true
+	s.timer.Stop()
+	s.cancel()
 }
 
 func (b *Server) serveLegacy(w http.ResponseWriter, r *http.Request, id string, sse bool) {

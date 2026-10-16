@@ -1,6 +1,7 @@
 package mcpstdio_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -254,6 +255,11 @@ func TestStdioRequestCancellation(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "job", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: []string{"2026-07-28"}})
 	handler := modernHandler(server)
 	remote := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if bytes.Contains(body, []byte(`"notifications/cancelled"`)) {
+			t.Error("forwarded a cancellation notification to an HTTP remote")
+		}
 		if r.Header.Get("Mcp-Method") != "tools/call" {
 			handler.ServeHTTP(w, r)
 			return
@@ -284,17 +290,66 @@ func TestStdioRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestStdioCurrentStreamRemote(t *testing.T) {
+	started, stopped := make(chan struct{}), make(chan struct{})
+	server := mcp.NewServer(&mcp.Implementation{Name: "stream", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: []string{"2026-07-28"}})
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				return nil, errors.New("tool catalog unavailable")
+			}
+			return next(ctx, method, req)
+		}
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "echo"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "wait"}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return nil, nil, ctx.Err()
+	})
+	remote, upstream := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(t.Context(), upstream, nil); err != nil {
+		t.Fatal(err)
+	}
+	local, downstream := mcp.NewInMemoryTransports()
+	go func() { _ = mcpbridge.Run(t.Context(), remote, local) }()
+	session, err := mcp.NewClient(&mcp.Implementation{Name: "client", Version: "1"}, nil).Connect(t.Context(), downstream, &mcp.ClientSessionOptions{ProtocolVersion: "2026-07-28"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() { _, _ = session.CallTool(ctx, &mcp.CallToolParams{Name: "wait", Arguments: map[string]any{}}) }()
+	<-started
+	cancel()
+	<-stopped
+}
+
 func TestStdioInvalidHeaderArgument(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "tenant", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: []string{"2026-07-28"}})
 	mcp.AddTool(server, &mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"tenant": map[string]any{"type": "string", "x-mcp-header": "Tenant"}}}}, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, any, error) {
 		return &mcp.CallToolResult{}, nil, nil
 	})
-	session, _ := connectClient(t, modernHandler(server), nil, "2025-11-25")
-	for _, arguments := range []any{map[string]any{"tenant": 1.5}, "not-an-object"} {
-		var wire *jsonrpc.Error
-		if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: arguments}); err != nil && !errors.As(err, &wire) {
-			t.Fatalf("arguments %v: %v", arguments, err)
+	handler := modernHandler(server)
+	var calls atomic.Int32
+	session, _ := connectClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Mcp-Method") == "tools/call" {
+			calls.Add(1)
 		}
+		handler.ServeHTTP(w, r)
+	}), nil, "2025-11-25")
+	var wire *jsonrpc.Error
+	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"tenant": 1.5}}); !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInvalidParams || calls.Load() != 0 {
+		t.Fatalf("invalid header argument = %v after %d upstream calls", err, calls.Load())
+	}
+	if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: "not-an-object"}); err != nil && !errors.As(err, &wire) {
+		t.Fatalf("non-object arguments = %v", err)
 	}
 }
 

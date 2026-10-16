@@ -61,7 +61,9 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 			var name string
 			if _ = json.Unmarshal(tool["name"], &name); name == call.Name {
 				var schema headerProperty
-				_ = json.Unmarshal(tool["inputSchema"], &schema)
+				if err := json.Unmarshal(tool["inputSchema"], &schema); err != nil {
+					return nil, err
+				}
 				var headers []HeaderArgument
 				var collect func(map[string]headerProperty, map[string]any)
 				collect = func(properties map[string]headerProperty, arguments map[string]any) {
@@ -92,7 +94,7 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 func ToolPages(ctx context.Context, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) iter.Seq2[[]map[string]json.RawMessage, error] {
 	return func(yield func([]map[string]json.RawMessage, error) bool) {
 		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(params, &fields); err != nil || fields == nil {
+		if _ = json.Unmarshal(params, &fields); fields == nil {
 			yield(nil, errors.New("tools/list parameters must be an object"))
 			return
 		}
@@ -208,8 +210,8 @@ func DecodeHeader(value string) (string, error) {
 		if !ok {
 			return "", errors.New("invalid encoded header")
 		}
-		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
-		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded || !utf8.Valid(decoded) {
+		decoded, _ := base64.StdEncoding.DecodeString(encoded)
+		if base64.StdEncoding.EncodeToString(decoded) != encoded || !utf8.Valid(decoded) {
 			return "", errors.New("invalid encoded header")
 		}
 		return string(decoded), nil
@@ -261,9 +263,8 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	}
 	var info mcp.Implementation
 	var capabilities map[string]json.RawMessage
-	_ = json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info)
 	_ = json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities)
-	if info.Name == "" || info.Version == "" || capabilities == nil {
+	if json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info) != nil || info.Name == "" || info.Version == "" || capabilities == nil {
 		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "clientInfo and clientCapabilities are required"}
 	}
 	if len(headers.Values("Mcp-Method")) != 1 || headers.Get("Mcp-Method") != req.Method {
