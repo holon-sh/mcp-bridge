@@ -1,11 +1,11 @@
-package bridge
+package mcpstdio
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -25,10 +25,7 @@ func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downs
 	}
 	defer b.session.Close()
 	upstream := b.session.InitializeResult()
-	info := upstream.ServerInfo
-	if info == nil {
-		info = &mcp.Implementation{Name: "mcp-bridge", Version: "preview"}
-	}
+	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "preview"})
 	caps := &mcp.ServerCapabilities{Completions: upstream.Capabilities.Completions, Extensions: appExtension(upstream.Capabilities.Extensions)}
 	if upstream.Capabilities.Tools != nil {
 		caps.Tools = &mcp.ToolCapabilities{}
@@ -68,10 +65,7 @@ func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downs
 		}
 	})
 	err := server.Run(ctx, connectionTransport{downstream})
-	if cause := context.Cause(ctx); cause != nil {
-		return cause
-	}
-	return err
+	return cmp.Or(context.Cause(ctx), err)
 }
 
 type connectionTransport struct{ mcp.Connection }
@@ -125,9 +119,7 @@ func (b *legacyBridge) connect(ctx context.Context, remote *mcp.StreamableClient
 						return result, nil
 					}
 				}
-				meta := maps.Clone(req.GetParams().GetMeta())
-				delete(meta, mcp.MetaKeySubscriptionID)
-				req.GetParams().SetMeta(meta)
+				delete(req.GetParams().GetMeta(), mcp.MetaKeySubscriptionID)
 				raw, err := json.Marshal(req.GetParams())
 				if err == nil {
 					err = b.local.Write(ctx, &jsonrpc.Request{Method: method, Params: raw})
@@ -141,27 +133,22 @@ func (b *legacyBridge) connect(ctx context.Context, remote *mcp.StreamableClient
 	})
 	b.session, err = client.Connect(ctx, connectionTransport{observer}, &mcp.ClientSessionOptions{ProtocolVersion: proxy.CurrentVersion})
 	if err != nil {
-		upstream.Close()
 		return err
 	}
 	go func() {
-		err := b.session.Wait()
-		if err == nil {
-			err = errors.New("upstream connection closed")
-		}
-		b.cancel(err)
+		b.cancel(cmp.Or(b.session.Wait(), errors.New("upstream connection closed")))
 	}()
 	return nil
 }
 
 func (b *legacyBridge) forward(ctx context.Context, method string, params mcp.Params) (mcp.Result, error) {
 	// Replace client-supplied protocol metadata with the negotiated upstream identity.
-	if params != nil && !reflect.ValueOf(params).IsNil() {
-		meta := maps.Clone(params.GetMeta())
+	// The SDK supplies typed params, including typed nil for optional params.
+	if !reflect.ValueOf(params).IsNil() {
+		meta := params.GetMeta()
 		delete(meta, mcp.MetaKeyProtocolVersion)
 		delete(meta, mcp.MetaKeyClientInfo)
 		delete(meta, mcp.MetaKeyClientCapabilities)
-		params.SetMeta(meta)
 	}
 	switch method {
 	case "tools/list":
@@ -254,11 +241,10 @@ func (u *legacyUpstream) Write(ctx context.Context, msg jsonrpc.Message) error {
 				return err
 			}
 			u.bridge.subMu.Lock()
-			for _, uri := range params.Notifications.ResourceSubscriptions {
-				if sub := u.bridge.subscriptions[uri]; sub != nil {
-					u.bridge.listens[req.ID] = sub
-				}
-			}
+			// ClientSession.Subscribe opens one stream for the URI registered by
+			// subscribe; subscriptionOps holds it in place until acknowledgement.
+			uri := params.Notifications.ResourceSubscriptions[0]
+			u.bridge.listens[req.ID] = u.bridge.subscriptions[uri]
 			u.bridge.subMu.Unlock()
 		}
 	}

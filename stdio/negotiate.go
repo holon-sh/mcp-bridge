@@ -1,6 +1,7 @@
-package bridge
+package mcpstdio
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,15 +25,8 @@ func requiresTranslation(ctx context.Context, remote *mcp.StreamableClientTransp
 	transport.DisableStandaloneSSE = true
 	transport.MaxRetries = -1
 	transport.MaxEventSize = proxy.MaxMessageBytes
-	httpClient := http.DefaultClient
-	if remote.HTTPClient != nil {
-		httpClient = remote.HTTPClient
-	}
-	clientCopy := *httpClient
-	rt := clientCopy.Transport
-	if rt == nil {
-		rt = http.DefaultTransport
-	}
+	clientCopy := *cmp.Or(remote.HTTPClient, http.DefaultClient)
+	rt := cmp.Or(clientCopy.Transport, http.DefaultTransport)
 	var status atomic.Int32
 	clientCopy.Transport = internalremote.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		res, err := rt.RoundTrip(req)
@@ -70,33 +64,31 @@ func requiresTranslation(ctx context.Context, remote *mcp.StreamableClientTransp
 				}
 				return nil, discoveryError
 			}
+			// Connect only sends discovery here: initialize is intercepted above,
+			// and this probe has no notification handlers that open subscriptions.
 			result, err := next(ctx, method, req)
-			if method == "server/discover" {
-				discoveryError = err
-				var rpcErr *jsonrpc.Error
-				if errors.As(err, &rpcErr) && rpcErr.Code == mcp.CodeUnsupportedProtocolVersion {
-					var data mcp.UnsupportedProtocolVersionData
-					if json.Unmarshal(rpcErr.Data, &data) == nil {
-						versions = data.Supported
-					}
+			discoveryError = err
+			var rpcErr *jsonrpc.Error
+			if errors.As(err, &rpcErr) && rpcErr.Code == mcp.CodeUnsupportedProtocolVersion {
+				var data mcp.UnsupportedProtocolVersionData
+				if json.Unmarshal(rpcErr.Data, &data) == nil {
+					versions = data.Supported
 				}
-				if err == nil {
-					versions = result.(*mcp.DiscoverResult).SupportedVersions
-				}
+			}
+			if err == nil {
+				versions = result.(*mcp.DiscoverResult).SupportedVersions
 			}
 			return result, err
 		}
 	})
 	session, err := client.Connect(ctx, &transport, &mcp.ClientSessionOptions{ProtocolVersion: proxy.CurrentVersion})
-	if session != nil {
-		defer session.Close()
-	}
 	if errors.Is(err, errLegacyUpstream) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
+	defer session.Close()
 	return !slices.ContainsFunc(versions, proxy.IsLegacyVersion), nil
 }
 

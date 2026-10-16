@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	mcphttp "github.com/hughhan1/mcp-bridge/http"
 	"github.com/hughhan1/mcp-bridge/internal/testutil"
@@ -281,19 +280,10 @@ func TestLegacyCancellationDoesNotReplayTool(t *testing.T) {
 		}
 		done <- err
 	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected cancellation, got %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("proxy did not stop")
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
 	}
-	select {
-	case <-cancelled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("upstream request was not cancelled")
-	}
+	<-cancelled
 }
 
 func TestLegacyFailuresDoNotReplayTools(t *testing.T) {
