@@ -1,13 +1,11 @@
 package mcphttp
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"os/exec"
@@ -224,8 +222,7 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if b.version != "" {
-			data, _ := jsonrpc.EncodeMessage(req)
-			r.Body = io.NopCloser(bytes.NewReader(data))
+			setBody(r, req)
 			r.Header.Set("Mcp-Protocol-Version", b.version)
 		}
 		id := rand.Text()

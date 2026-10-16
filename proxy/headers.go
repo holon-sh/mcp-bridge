@@ -43,9 +43,7 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 		Arguments map[string]any             `json:"arguments"`
 		Meta      map[string]json.RawMessage `json:"_meta"`
 	}
-	if err := json.Unmarshal(params, &call); err != nil {
-		return nil, err
-	}
+	_ = json.Unmarshal(params, &call)
 	delete(call.Meta, "progressToken")
 	raw, _ := json.Marshal(map[string]any{"_meta": call.Meta})
 	pageCount := 0
@@ -61,14 +59,9 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 		}
 		for _, tool := range tools {
 			var name string
-			if err := json.Unmarshal(tool["name"], &name); err != nil {
-				return nil, err
-			}
-			if name == call.Name {
+			if _ = json.Unmarshal(tool["name"], &name); name == call.Name {
 				var schema headerProperty
-				if err := json.Unmarshal(tool["inputSchema"], &schema); err != nil {
-					return nil, err
-				}
+				_ = json.Unmarshal(tool["inputSchema"], &schema)
 				var headers []HeaderArgument
 				var collect func(map[string]headerProperty, map[string]any)
 				collect = func(properties map[string]headerProperty, arguments map[string]any) {
@@ -149,7 +142,7 @@ func SetArgumentHeaders(headers http.Header, arguments []HeaderArgument) error {
 		}
 		text := fmt.Sprint(value)
 		if !primitiveMatches(value, text) {
-			return errors.New("invalid MCP header argument")
+			return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid MCP header argument"}
 		}
 		headers.Set(name, EncodeHeader(text))
 	}
@@ -258,14 +251,9 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	if headers.Get("Mcp-Protocol-Version") == "" {
 		return Mismatch("Mcp-Protocol-Version")
 	}
-	var params map[string]json.RawMessage
-	if json.Unmarshal(req.Params, &params) != nil {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "params must be an object"}
-	}
-	var meta map[string]json.RawMessage
-	if json.Unmarshal(params["_meta"], &meta) != nil {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "request metadata is required"}
-	}
+	var params, meta map[string]json.RawMessage
+	_ = json.Unmarshal(req.Params, &params)
+	_ = json.Unmarshal(params["_meta"], &meta)
 	var version string
 	_ = json.Unmarshal(meta[mcp.MetaKeyProtocolVersion], &version)
 	if version != expected {
@@ -273,28 +261,59 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	}
 	var info mcp.Implementation
 	var capabilities map[string]json.RawMessage
-	if json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info) != nil || info.Name == "" || info.Version == "" || json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities) != nil || capabilities == nil {
+	_ = json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info)
+	_ = json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities)
+	if info.Name == "" || info.Version == "" || capabilities == nil {
 		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "clientInfo and clientCapabilities are required"}
 	}
 	if len(headers.Values("Mcp-Method")) != 1 || headers.Get("Mcp-Method") != req.Method {
 		return Mismatch("Mcp-Method")
 	}
-	field := ""
-	switch req.Method {
-	case "tools/call", "prompts/get":
-		field = "name"
-	case "resources/read":
-		field = "uri"
+	name, issue := requestName(req.Method, params)
+	if issue != nil {
+		return issue
 	}
-	if field != "" {
-		var name string
-		if json.Unmarshal(params[field], &name) != nil || name == "" {
-			return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing name or uri"}
-		}
-		value, err := HeaderValue(headers, "Mcp-Name")
-		if err != nil || value != name {
-			return Mismatch("Mcp-Name")
-		}
+	if value, _ := HeaderValue(headers, "Mcp-Name"); value != name {
+		return Mismatch("Mcp-Name")
 	}
 	return nil
+}
+
+// SetHeaders sets the [request metadata headers] for req, looking up tools/call
+// schemas with request as [ToolHeaderArguments] does.
+//
+// [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
+func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) error {
+	var params map[string]json.RawMessage
+	_ = json.Unmarshal(req.Params, &params)
+	name, issue := requestName(req.Method, params)
+	if issue != nil {
+		return issue
+	}
+	var arguments []HeaderArgument
+	if req.Method == "tools/call" {
+		var err error
+		if arguments, err = ToolHeaderArguments(ctx, req.Params, request); err != nil {
+			return err
+		}
+	}
+	headers.Set("Mcp-Method", req.Method)
+	if name != "" {
+		headers.Set("Mcp-Name", EncodeHeader(name))
+	}
+	return SetArgumentHeaders(headers, arguments)
+}
+
+var nameFields = map[string]string{"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+
+func requestName(method string, params map[string]json.RawMessage) (string, *jsonrpc.Error) {
+	field, ok := nameFields[method]
+	if !ok {
+		return "", nil
+	}
+	var name string
+	if _ = json.Unmarshal(params[field], &name); name == "" {
+		return "", &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing name or uri"}
+	}
+	return name, nil
 }

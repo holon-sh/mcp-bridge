@@ -225,27 +225,13 @@ func (r *remoteConnection) Write(ctx context.Context, msg jsonrpc.Message) error
 		defer r.writes.Done()
 		var err error
 		var params struct {
-			Name string   `json:"name"`
-			URI  string   `json:"uri"`
 			Meta mcp.Meta `json:"_meta"`
 		}
 		_ = json.Unmarshal(req.Params, &params)
 		version, _ := params.Meta[mcp.MetaKeyProtocolVersion].(string)
 		if r.client != nil && version >= proxy.CurrentVersion {
 			headers := make(http.Header)
-			switch req.Method {
-			case "tools/call", "prompts/get":
-				headers.Set("Mcp-Name", proxy.EncodeHeader(params.Name))
-			case "resources/read":
-				headers.Set("Mcp-Name", proxy.EncodeHeader(params.URI))
-			}
-			if req.Method == "tools/call" {
-				var arguments []proxy.HeaderArgument
-				arguments, err = proxy.ToolHeaderArguments(ctx, req.Params, r.request)
-				if err == nil {
-					err = proxy.SetArgumentHeaders(headers, arguments)
-				}
-			}
+			err = proxy.SetHeaders(ctx, headers, req, r.request)
 			ctx = context.WithValue(ctx, remoteHeadersKey{}, headers)
 		}
 		if err == nil {
@@ -254,15 +240,11 @@ func (r *remoteConnection) Write(ctx context.Context, msg jsonrpc.Message) error
 		if err != nil && ctx.Err() == nil {
 			var rpcErr *jsonrpc.Error
 			if errors.As(err, &rpcErr) {
-				id := req.ID
 				r.mu.Lock()
-				cancel := r.calls[id]
-				delete(r.calls, id)
+				delete(r.calls, req.ID)
 				r.mu.Unlock()
-				r.deliver(&jsonrpc.Response{ID: id, Error: rpcErr}, nil)
-				if cancel != nil {
-					cancel()
-				}
+				r.deliver(&jsonrpc.Response{ID: req.ID, Error: rpcErr}, nil)
+				cancel()
 			} else {
 				r.deliver(nil, err)
 			}

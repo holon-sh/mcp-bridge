@@ -284,6 +284,20 @@ func TestStdioRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestStdioInvalidHeaderArgument(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "tenant", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: []string{"2026-07-28"}})
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"tenant": map[string]any{"type": "string", "x-mcp-header": "Tenant"}}}}, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+	session, _ := connectClient(t, modernHandler(server), nil, "2025-11-25")
+	for _, arguments := range []any{map[string]any{"tenant": 1.5}, "not-an-object"} {
+		var wire *jsonrpc.Error
+		if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: arguments}); err != nil && !errors.As(err, &wire) {
+			t.Fatalf("arguments %v: %v", arguments, err)
+		}
+	}
+}
+
 func TestStdioUnsupportedResults(t *testing.T) {
 	for _, method := range []string{"tools/call", "resources/read", "prompts/get"} {
 		t.Run(method, func(t *testing.T) {

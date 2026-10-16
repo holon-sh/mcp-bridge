@@ -5,13 +5,58 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/hughhan1/mcp-bridge/proxy"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
+
+func TestValidateHeaders(t *testing.T) {
+	version := `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`
+	info := `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1"}`
+	capabilities := `"io.modelcontextprotocol/clientCapabilities":{}`
+	meta := func(fields ...string) string { return `"_meta":{` + strings.Join(fields, ",") + `}` }
+	for _, test := range []struct {
+		name, method, params string
+		headers              http.Header
+		valid                bool
+	}{
+		{name: "call", method: "tools/call", params: `{"name":"echo",` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo"}}, valid: true},
+		{name: "list", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, valid: true},
+		{name: "missing version header", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Protocol-Version": nil}},
+		{name: "metadata version", method: "tools/list", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`},
+		{name: "client name", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`},
+		{name: "client version", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client"}`, capabilities) + `}`},
+		{name: "client capabilities", method: "tools/list", params: `{` + meta(version, info) + `}`},
+		{name: "duplicate method", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}},
+		{name: "missing name", method: "tools/call", params: `{` + meta(version, info, capabilities) + `}`},
+		{name: "unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {test.method}}
+			maps.Copy(headers, test.headers)
+			if err := proxy.ValidateHeaders(headers, &jsonrpc.Request{Method: test.method, Params: json.RawMessage(test.params)}, proxy.CurrentVersion); (err == nil) != test.valid {
+				t.Fatalf("ValidateHeaders = %v", err)
+			}
+		})
+	}
+}
+
+func TestToolHeaderArgumentsBoundsPagination(t *testing.T) {
+	pages := 0
+	_, err := proxy.ToolHeaderArguments(t.Context(), json.RawMessage(`{"name":"echo"}`), func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+		pages++
+		return json.Marshal(map[string]any{"tools": []any{}, "nextCursor": strings.Repeat("x", pages%101)})
+	})
+	if err == nil {
+		t.Fatal("unbounded tool catalog pagination")
+	}
+}
 
 func TestToolPages(t *testing.T) {
 	const tool = `{"name":"echo","inputSchema":{"const":9007199254740993},"extension":{"retained":true}}`
