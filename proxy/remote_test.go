@@ -160,6 +160,11 @@ func TestLegacyCompatibility(t *testing.T) {
 	})
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			for _, key := range []string{"Mcp-Method", "Mcp-Name", "Mcp-Param-Workspace"} {
+				if req.GetExtra().Header.Get(key) != "" {
+					t.Errorf("retained stateless header %s", key)
+				}
+			}
 			if method == "tools/list" {
 				check(req)
 				return &mcp.ListToolsResult{
@@ -170,16 +175,11 @@ func TestLegacyCompatibility(t *testing.T) {
 			return next(ctx, method, req)
 		}
 	})
-	provider := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{JSONResponse: true})
 	authenticate := auth.RequireBearerToken(func(_ context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		return &auth.TokenInfo{UserID: token}, nil
 	}, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})
-	transport, endpoint := legacyTestTransport(t, legacyTestRejectCurrent(authenticate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, key := range []string{"Mcp-Method", "Mcp-Name", "Mcp-Param-Workspace"} {
-			if r.Header.Get(key) != "" {
-				t.Errorf("retained stateless header %s", key)
-			}
-		}
+	provider := legacyTestRejectCurrent(authenticate(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{JSONResponse: true})))
+	transport, endpoint := legacyTestTransport(t, func(w http.ResponseWriter, r *http.Request) {
 		recorder := httptest.NewRecorder()
 		provider.ServeHTTP(recorder, r)
 		if r.Method == http.MethodDelete && recorder.Code == http.StatusNoContent {
@@ -193,7 +193,7 @@ func TestLegacyCompatibility(t *testing.T) {
 		compressed := gzip.NewWriter(w)
 		compressed.Write(recorder.Body.Bytes())
 		compressed.Close()
-	}))))
+	})
 	var workers sync.WaitGroup
 	for _, tc := range []struct{ method, result string }{
 		{"server/discover", `{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"instructions":"Use profile to inspect the authenticated account.","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"legacy","version":"1"}},"resultType":"complete","cacheScope":"private","ttlMs":0}`},
