@@ -18,14 +18,29 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 
 	mcphttp "github.com/hughhan1/mcp-bridge/http"
+	"github.com/hughhan1/mcp-bridge/internal/remote"
 	"github.com/hughhan1/mcp-bridge/internal/testutil"
 	"github.com/hughhan1/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func TestNativeDiscoveryStreams(t *testing.T) {
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"text/event-stream; charset=utf-8"}},
+		Body:       io.NopCloser(iotest.ErrReader(errors.New("stream must not be buffered"))),
+	}
+	transport := proxy.NewRemoteTransport(remote.RoundTripFunc(func(*http.Request) (*http.Response, error) { return upstream, nil }))
+	response, err := transport.RoundTrip(legacyRequest(t, "https://example.com", "server/discover", "alice"))
+	if err != nil || response != upstream {
+		t.Fatalf("stream was not passed through: %v", err)
+	}
+}
 
 func legacyTestTransport(t *testing.T, handler http.HandlerFunc) (http.RoundTripper, string) {
 	t.Helper()
@@ -39,6 +54,10 @@ func legacyTestRejectCurrent(handler http.Handler) http.HandlerFunc {
 		if r.Header.Get("Mcp-Protocol-Version") == proxy.CurrentVersion {
 			req, ok := mcphttp.ReadMessage(w, r, mcp.DefaultMaxLineLength).(*jsonrpc.Request)
 			if !ok {
+				return
+			}
+			if req.Method == "server/discover" {
+				mcphttp.WriteError(w, http.StatusOK, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not found"})
 				return
 			}
 			if req.Method != "notifications/initialized" {
@@ -93,7 +112,7 @@ func legacyRequest(t *testing.T, endpoint, method, token string) *http.Request {
 	return r
 }
 
-func TestLegacyToolCompatibility(t *testing.T) {
+func TestLegacyCompatibility(t *testing.T) {
 	var created, executed, deleted atomic.Int32
 	check := func(req mcp.Request) {
 		executed.Add(1)
@@ -108,6 +127,11 @@ func TestLegacyToolCompatibility(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "legacy", Version: "1"}, &mcp.ServerOptions{
 		SupportedProtocolVersions: []string{"2025-06-18"},
 		GetSessionID:              func() string { return strconv.Itoa(int(created.Add(1))) },
+		Instructions:              "Use profile to inspect the authenticated account.",
+		Capabilities: &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{ListChanged: true},
+			Resources: &mcp.ResourceCapabilities{Subscribe: true},
+		},
 	})
 	t.Cleanup(func() {
 		for session := range server.Sessions() {
@@ -172,7 +196,8 @@ func TestLegacyToolCompatibility(t *testing.T) {
 	}))))
 	var workers sync.WaitGroup
 	for _, tc := range []struct{ method, result string }{
-		{"tools/list", `{"tools":[{"name":"profile","inputSchema":{"type":"object","properties":{"format":{"type":"string","enum":["concise"]}}},"annotations":{"readOnlyHint":true}}],"nextCursor":"next-page","resultType":"complete","cacheScope":"private"}`},
+		{"server/discover", `{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"instructions":"Use profile to inspect the authenticated account.","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"legacy","version":"1"}},"resultType":"complete","cacheScope":"private","ttlMs":0}`},
+		{"tools/list", `{"tools":[{"name":"profile","inputSchema":{"type":"object","properties":{"format":{"type":"string","enum":["concise"]}}},"annotations":{"readOnlyHint":true,"idempotentHint":false}}],"nextCursor":"next-page","resultType":"complete","cacheScope":"private","ttlMs":0}`},
 		{"tools/call", `{"content":[{"type":"text","text":"$OWNER"}],"structuredContent":{"owner":"$OWNER"},"isError":true,"resultType":"complete","cacheScope":"private"}`},
 	} {
 		for _, owner := range []string{"alice", "bob"} {
@@ -187,17 +212,7 @@ func TestLegacyToolCompatibility(t *testing.T) {
 					return
 				}
 				defer response.Body.Close()
-				var reply, want struct {
-					JSONRPC string
-					ID      int
-					Result  struct {
-						ResultType, CacheScope, NextCursor string
-						Content                            []map[string]any
-						StructuredContent                  map[string]any
-						IsError                            bool
-						Tools                              []*mcp.Tool
-					}
-				}
+				var reply, want map[string]any
 				_ = json.Unmarshal([]byte(strings.ReplaceAll(`{"jsonrpc":"2.0","id":1,"result":`+tc.result+`}`, "$OWNER", "Bearer "+owner)), &want)
 				if err := json.NewDecoder(response.Body).Decode(&reply); err != nil {
 					t.Error(err)
@@ -213,21 +228,24 @@ func TestLegacyToolCompatibility(t *testing.T) {
 		}
 	}
 	workers.Wait()
-	if created.Load() != 4 || executed.Load() != 4 || deleted.Load() != 4 {
+	if created.Load() != 6 || executed.Load() != 4 || deleted.Load() != 6 {
 		t.Fatalf("session lifecycle: created=%d executed=%d deleted=%d", created.Load(), executed.Load(), deleted.Load())
 	}
 }
 
-func TestFallbackRequiresExplicitVersionRejection(t *testing.T) {
+func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		method  string
 		status  int
 		body    string
 		headers http.Header
 	}{
-		{name: "authentication", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"unsupported"}}`},
+		{name: "tool method not found", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
+		{name: "discovery authentication", method: "server/discover", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
+		{name: "discovery response ID mismatch", method: "server/discover", status: 200, body: `{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}`},
+		{name: "native discovery", method: "server/discover", status: 200, body: `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"resources":{},"tools":{"listChanged":true}}}}`},
 		{name: "invalid parameters", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`},
-		{name: "response ID mismatch", status: 400, body: `{"jsonrpc":"2.0","id":"other-id","error":{"code":-32022,"message":"unsupported"}}`},
 		{name: "oversized ordinary error", status: 400, body: strings.Repeat("ordinary upstream error", mcp.DefaultMaxLineLength/10)},
 		{
 			name:    "request header mismatch",
@@ -246,7 +264,7 @@ func TestFallbackRequiresExplicitVersionRejection(t *testing.T) {
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
 			})
-			r := legacyRequest(t, endpoint, "tools/call", "alice")
+			r := legacyRequest(t, endpoint, cmp.Or(tc.method, "tools/call"), "alice")
 			maps.Copy(r.Header, tc.headers)
 			response, err := transport.RoundTrip(r)
 			if err != nil {
@@ -275,15 +293,11 @@ func TestLegacyCancellationDoesNotReplayTool(t *testing.T) {
 		<-r.Context().Done()
 		close(cancelled)
 	}))
-	done := make(chan error, 1)
-	go func() {
-		response, err := transport.RoundTrip(legacyRequest(t, endpoint, "tools/call", "alice").WithContext(ctx))
-		if response != nil {
-			response.Body.Close()
-		}
-		done <- err
-	}()
-	if err := <-done; !errors.Is(err, context.Canceled) {
+	response, err := transport.RoundTrip(legacyRequest(t, endpoint, "tools/call", "alice").WithContext(ctx))
+	if response != nil {
+		response.Body.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancellation, got %v", err)
 	}
 	<-cancelled
@@ -362,8 +376,7 @@ func TestLegacyHTTPRejections(t *testing.T) {
 				w.WriteHeader(tc.status)
 				io.WriteString(w, tc.body)
 			})
-			method := cmp.Or(strings.TrimPrefix(tc.stage, "initialize"), "tools/call")
-			response, err := transport.RoundTrip(legacyRequest(t, endpoint, method, "alice"))
+			response, err := transport.RoundTrip(legacyRequest(t, endpoint, "tools/call", "alice"))
 			if tc.status < 400 {
 				if err == nil {
 					t.Fatalf("returned redirect %d", response.StatusCode)
