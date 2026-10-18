@@ -39,6 +39,7 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	r = r.Clone(r.Context())
+	r.Header.Del("Accept-Encoding")
 	r.Body = io.NopCloser(bytes.NewReader(sent))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(sent)), nil }
 	response, err := t.base.RoundTrip(r)
@@ -97,7 +98,7 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 	headers := r.Header.Clone()
 	maps.DeleteFunc(headers, func(key string, _ []string) bool {
 		lower := strings.ToLower(key)
-		return strings.HasPrefix(lower, "mcp-") || slices.Contains([]string{"last-event-id", "content-length", "accept", "accept-encoding", "content-type"}, lower)
+		return strings.HasPrefix(lower, "mcp-") || slices.Contains([]string{"last-event-id", "content-length", "accept", "content-type"}, lower)
 	})
 	var failure atomic.Pointer[http.Response]
 	session, err := client.Connect(r.Context(), remote.Streamable(mcp.StreamableClientTransport{
