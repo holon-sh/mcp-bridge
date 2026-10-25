@@ -19,3 +19,5 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
+
+retract v0.0.1 // Published before the module path migration.

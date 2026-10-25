@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](https://go.dev/doc/install)
-[![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb)
+[![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge)
 [![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/holon-sh/mcp-bridge/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -149,40 +149,15 @@ For clients using an `mcpServers` configuration:
 
 ## Go API
 
-The Go module and CLI are released as `v0.0.1`. During the repository transfer,
-the public Go mirror cached the previous module declaration for this version.
-Its checksum record cannot be replaced, so this release requires direct GitHub
-downloads and the verified checksums below.
-
-In an initialized Go module, add these entries to `go.sum` and commit them with
-your dependency update. Replace any existing entries for this exact module and
-version with these release checksums:
-
-```text
-github.com/holon-sh/mcp-bridge v0.0.1 h1:4F5hV1S3kxFmMAYOigIRoMpwkgMpgyyUNQd7ndhWVCw=
-github.com/holon-sh/mcp-bridge v0.0.1/go.mod h1:76IKcYSKdyEqo9JuKD/hAo3vQ19CnXj3jBGXuN47Amg=
-```
-
-Then fetch `v0.0.1` directly:
-
 ```sh
-export GONOPROXY="github.com/holon-sh/mcp-bridge,$(go env GONOPROXY)"
-go get github.com/holon-sh/mcp-bridge@v0.0.1
+go get github.com/holon-sh/mcp-bridge@v0.0.2
 ```
-
-Set the same `GONOPROXY` exception in CI and developer environments. Go checks
-the download against the committed `go.sum`; checksum verification remains
-enabled. If a local cache already contains the previous `v0.0.1`, remove only
-this module's cached version before retrying. Using `@v0.0.1` with the default
-public mirror still returns the old module declaration. Package documentation
-links below use the exact release commit because that version was indexed
-correctly.
 
 This repository provides these Go packages:
 
-- [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/http) serves stdio MCP servers over HTTP.
-- [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
-- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
+- [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/http) serves stdio MCP servers over HTTP.
+- [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
+- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
 
 They run inside your Go program without invoking the CLI.
 
@@ -274,7 +249,7 @@ func connectSSE(ctx context.Context, token string) error {
 
 ### Custom proxies
 
-Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/proxy) to forward
+Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) to forward
 messages between existing MCP connections, list tools across pages, or handle MCP
 HTTP headers in your own bridge. For example, relay an upstream server connection
 to a downstream client connection:
@@ -284,4 +259,4 @@ err := proxy.Relay(ctx, upstream, downstream)
 ```
 
 Both connections close when forwarding ends. See the
-[API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/proxy) for details.
+[API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) for details.
