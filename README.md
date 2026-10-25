@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](https://go.dev/doc/install)
-[![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge)
+[![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb)
 [![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/holon-sh/mcp-bridge/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -149,11 +149,21 @@ For clients using an `mcpServers` configuration:
 
 ## Go API
 
+Use the exact source commit of GitHub release `v0.0.1`:
+
+```sh
+go get github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb
+```
+
+The Go module proxy cached the previous module declaration for `v0.0.1` during
+this repository's transfer. Go module versions are immutable, so Go consumers
+must use this commit pin. The CLI release remains `0.0.1`.
+
 This repository provides these Go packages:
 
-- [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/http) serves stdio MCP servers over HTTP.
-- [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
-- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
+- [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/http) serves stdio MCP servers over HTTP.
+- [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
+- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
 
 They run inside your Go program without invoking the CLI.
 
@@ -245,7 +255,7 @@ func connectSSE(ctx context.Context, token string) error {
 
 ### Custom proxies
 
-Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) to forward
+Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/proxy) to forward
 messages between existing MCP connections, list tools across pages, or handle MCP
 HTTP headers in your own bridge. For example, relay an upstream server connection
 to a downstream client connection:
@@ -255,4 +265,4 @@ err := proxy.Relay(ctx, upstream, downstream)
 ```
 
 Both connections close when forwarding ends. See the
-[API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) for details.
+[API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge@v0.0.0-20261025141317-cc9108a764eb/proxy) for details.
