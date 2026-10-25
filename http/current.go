@@ -95,7 +95,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 func clientMeta(version string) mcp.Meta {
 	return mcp.Meta{
 		mcp.MetaKeyProtocolVersion:    version,
-		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.1"},
+		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.2"},
 		mcp.MetaKeyClientCapabilities: map[string]any{},
 	}
 }
