@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hughhan1/mcp-bridge/internal/testutil"
-	"github.com/hughhan1/mcp-bridge/proxy"
-	mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
+	"github.com/holon-sh/mcp-bridge/internal/testutil"
+	"github.com/holon-sh/mcp-bridge/proxy"
+	mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

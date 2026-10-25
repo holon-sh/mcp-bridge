@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/hughhan1/mcp-bridge/proxy"
-	mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
+	"github.com/holon-sh/mcp-bridge/proxy"
+	mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 )

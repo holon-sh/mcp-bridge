@@ -1,4 +1,4 @@
-module github.com/hughhan1/mcp-bridge
+module github.com/holon-sh/mcp-bridge
 
 go 1.27.0
 
