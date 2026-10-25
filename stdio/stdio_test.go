@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
+	mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"

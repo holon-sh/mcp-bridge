@@ -13,7 +13,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/hughhan1/mcp-bridge/proxy"
+	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

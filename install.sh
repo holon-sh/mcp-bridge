@@ -21,7 +21,7 @@ main() {
         exit 1
     fi
 
-    repo=hughhan1/mcp-bridge
+    repo=holon-sh/mcp-bridge
     archive="mcp-bridge_${os}_${arch}.tar.gz"
     directory="$HOME/.local/bin"
     temp=$(mktemp -d)

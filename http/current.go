@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hughhan1/mcp-bridge/proxy"
+	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -95,7 +95,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 func clientMeta(version string) mcp.Meta {
 	return mcp.Meta{
 		mcp.MetaKeyProtocolVersion:    version,
-		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.1.0"},
+		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.1"},
 		mcp.MetaKeyClientCapabilities: map[string]any{},
 	}
 }

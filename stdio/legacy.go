@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hughhan1/mcp-bridge/proxy"
+	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -25,7 +25,7 @@ func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downs
 	}
 	defer b.session.Close()
 	upstream := b.session.InitializeResult()
-	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "preview"})
+	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.1"})
 	caps := &mcp.ServerCapabilities{Completions: upstream.Capabilities.Completions, Extensions: appExtension(upstream.Capabilities.Extensions)}
 	if upstream.Capabilities.Tools != nil {
 		caps.Tools = &mcp.ToolCapabilities{}

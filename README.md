@@ -1,9 +1,9 @@
 # mcp-bridge
 
-[![CI](https://github.com/hughhan1/mcp-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hughhan1/mcp-bridge/actions/workflows/ci.yml)
+[![CI](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](https://go.dev/doc/install)
-[![Go Reference](https://pkg.go.dev/badge/github.com/hughhan1/mcp-bridge.svg)](https://pkg.go.dev/github.com/hughhan1/mcp-bridge)
-[![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/hughhan1/mcp-bridge/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge)
+[![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/holon-sh/mcp-bridge/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A Go library and CLI that forwards MCP between stdio and HTTP using the
@@ -12,7 +12,7 @@ A Go library and CLI that forwards MCP between stdio and HTTP using the
 ## Install
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/hughhan1/mcp-bridge/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/holon-sh/mcp-bridge/main/install.sh | sh
 ```
 
 ## CLI
@@ -151,9 +151,9 @@ For clients using an `mcpServers` configuration:
 
 This repository provides these Go packages:
 
-- [`github.com/hughhan1/mcp-bridge/http`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/http) serves stdio MCP servers over HTTP.
-- [`github.com/hughhan1/mcp-bridge/stdio`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
-- [`github.com/hughhan1/mcp-bridge/proxy`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
+- [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/http) serves stdio MCP servers over HTTP.
+- [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
+- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
 
 They run inside your Go program without invoking the CLI.
 
@@ -166,7 +166,7 @@ import (
     "net/http"
     "os/exec"
 
-    mcpbridge "github.com/hughhan1/mcp-bridge/http"
+    mcpbridge "github.com/holon-sh/mcp-bridge/http"
 )
 
 func serve(ctx context.Context) error {
@@ -202,8 +202,8 @@ func serve(ctx context.Context) error {
 import (
     "context"
 
-    "github.com/hughhan1/mcp-bridge/proxy"
-    mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
+    "github.com/holon-sh/mcp-bridge/proxy"
+    mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
     "github.com/modelcontextprotocol/go-sdk/mcp"
     "golang.org/x/oauth2"
 )
@@ -227,7 +227,7 @@ func connect(ctx context.Context, token string) error {
 import (
     "context"
 
-    mcpbridge "github.com/hughhan1/mcp-bridge/stdio"
+    mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
     "github.com/modelcontextprotocol/go-sdk/mcp"
     "golang.org/x/oauth2"
 )
@@ -245,7 +245,7 @@ func connectSSE(ctx context.Context, token string) error {
 
 ### Custom proxies
 
-Use [`proxy`](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) to forward
+Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) to forward
 messages between existing MCP connections, list tools across pages, or handle MCP
 HTTP headers in your own bridge. For example, relay an upstream server connection
 to a downstream client connection:
@@ -255,4 +255,4 @@ err := proxy.Relay(ctx, upstream, downstream)
 ```
 
 Both connections close when forwarding ends. See the
-[API reference](https://pkg.go.dev/github.com/hughhan1/mcp-bridge/proxy) for details.
+[API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) for details.

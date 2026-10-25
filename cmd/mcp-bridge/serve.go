@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	mcpbridge "github.com/hughhan1/mcp-bridge/http"
+	mcpbridge "github.com/holon-sh/mcp-bridge/http"
 	"github.com/spf13/cobra"
 )
 

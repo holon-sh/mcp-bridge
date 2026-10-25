@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	internalremote "github.com/hughhan1/mcp-bridge/internal/remote"
-	"github.com/hughhan1/mcp-bridge/proxy"
+	internalremote "github.com/holon-sh/mcp-bridge/internal/remote"
+	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

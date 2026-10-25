@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	mcphttp "github.com/hughhan1/mcp-bridge/http"
-	"github.com/hughhan1/mcp-bridge/internal/remote"
-	"github.com/hughhan1/mcp-bridge/proxy"
+	mcphttp "github.com/holon-sh/mcp-bridge/http"
+	"github.com/holon-sh/mcp-bridge/internal/remote"
+	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

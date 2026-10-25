@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/hughhan1/mcp-bridge/proxy"
+	"github.com/holon-sh/mcp-bridge/proxy"
 )
 
 func Request(t *testing.T, method string, params map[string]any) *http.Request {
