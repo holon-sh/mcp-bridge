@@ -47,7 +47,7 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 	delete(call.Meta, "progressToken")
 	raw, _ := json.Marshal(map[string]any{"_meta": call.Meta})
 	pageCount := 0
-	for tools, err := range ToolPages(ctx, raw, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	for tools, err := range Pages[map[string]json.RawMessage](ctx, "tools/list", "tools", raw, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if pageCount == 100 {
 			return nil, errors.New("upstream tool pagination limit exceeded")
 		}
@@ -84,18 +84,19 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 	return nil, nil
 }
 
-// ToolPages lists all pages of a tool catalog, preserving tool schemas and
-// extension fields.
+// Pages lists all pages of an MCP list method, such as tools/list or the skills
+// extension's skills/list, preserving the fields of each item that T retains.
 //
-// The params argument contains tools/list parameters; use {} for no options.
-// The request callback sends each catalog request and returns its JSON result.
+// The params argument contains the method's parameters; use {} for no options.
+// The request callback sends each request and returns its JSON result, whose
+// field names the array of items on that page.
 //
 // Iteration ends after the last page, cancellation, or an error.
-func ToolPages(ctx context.Context, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) iter.Seq2[[]map[string]json.RawMessage, error] {
-	return func(yield func([]map[string]json.RawMessage, error) bool) {
+func Pages[T any](ctx context.Context, method, field string, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) iter.Seq2[[]T, error] {
+	return func(yield func([]T, error) bool) {
 		var fields map[string]json.RawMessage
 		if _ = json.Unmarshal(params, &fields); fields == nil {
-			yield(nil, errors.New("tools/list parameters must be an object"))
+			yield(nil, errors.New(method+" parameters must be an object"))
 			return
 		}
 		seen := map[string]bool{}
@@ -105,28 +106,29 @@ func ToolPages(ctx context.Context, params json.RawMessage, request func(context
 				return
 			}
 			raw, _ := json.Marshal(fields)
-			result, err := request(ctx, "tools/list", raw)
+			result, err := request(ctx, method, raw)
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			var page struct {
-				Tools      []map[string]json.RawMessage `json:"tools"`
-				NextCursor string                       `json:"nextCursor"`
+			var page map[string]json.RawMessage
+			var items []T
+			var next struct {
+				Cursor string `json:"nextCursor"`
 			}
-			if json.Unmarshal(result, &page) != nil || page.Tools == nil {
-				yield(nil, errors.New("invalid tools/list result"))
+			if json.Unmarshal(result, &page) != nil || json.Unmarshal(page[field], &items) != nil || items == nil || json.Unmarshal(result, &next) != nil {
+				yield(nil, errors.New("invalid "+method+" result"))
 				return
 			}
-			if !yield(page.Tools, nil) || page.NextCursor == "" {
+			if !yield(items, nil) || next.Cursor == "" {
 				return
 			}
-			if seen[page.NextCursor] {
-				yield(nil, errors.New("repeated catalog cursor"))
+			if seen[next.Cursor] {
+				yield(nil, errors.New("repeated "+method+" cursor"))
 				return
 			}
-			seen[page.NextCursor] = true
-			fields["cursor"], _ = json.Marshal(page.NextCursor)
+			seen[next.Cursor] = true
+			fields["cursor"], _ = json.Marshal(next.Cursor)
 		}
 	}
 }

@@ -59,7 +59,7 @@ func TestToolHeaderArgumentsBoundsPagination(t *testing.T) {
 	}
 }
 
-func TestToolPages(t *testing.T) {
+func TestPages(t *testing.T) {
 	const tool = `{"name":"echo","inputSchema":{"const":9007199254740993},"extension":{"retained":true}}`
 	var wantTools []map[string]json.RawMessage
 	_ = json.Unmarshal([]byte("["+tool+"]"), &wantTools)
@@ -69,9 +69,9 @@ func TestToolPages(t *testing.T) {
 			defer cancel()
 			calls, pages := 0, 0
 			cancelled := false
-			for tools, err := range proxy.ToolPages(ctx, json.RawMessage(`{"_meta":{"trace":"caller"},"extension":true}`), func(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
+			for tools, err := range proxy.Pages[map[string]json.RawMessage](ctx, "skills/list", "skills", json.RawMessage(`{"_meta":{"trace":"caller"},"extension":true}`), func(ctx context.Context, method string, raw json.RawMessage) (json.RawMessage, error) {
 				var params map[string]json.RawMessage
-				if ctx.Err() != nil || method != "tools/list" || json.Unmarshal(raw, &params) != nil ||
+				if ctx.Err() != nil || method != "skills/list" || json.Unmarshal(raw, &params) != nil ||
 					string(params["_meta"]) != `{"trace":"caller"}` || string(params["extension"]) != "true" {
 					t.Fatalf("request changed: %s %s", method, raw)
 				}
@@ -87,7 +87,7 @@ func TestToolPages(t *testing.T) {
 				if calls < 101 {
 					cursor = strconv.Itoa(calls)
 				}
-				return fmt.Appendf(nil, `{"tools":[%s],"nextCursor":%q}`, tool, cursor), nil
+				return fmt.Appendf(nil, `{"skills":[%s],"nextCursor":%q}`, tool, cursor), nil
 			}) {
 				if err != nil {
 					if stop == "cancelled" && errors.Is(err, context.Canceled) {
@@ -121,7 +121,7 @@ func TestToolPages(t *testing.T) {
 	}
 }
 
-func TestToolPageFailures(t *testing.T) {
+func TestPageFailures(t *testing.T) {
 	upstream := errors.New("unavailable")
 	for _, test := range []struct {
 		name string
@@ -136,7 +136,7 @@ func TestToolPageFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			failed := false
 			calls := 0
-			for _, err := range proxy.ToolPages(t.Context(), json.RawMessage(`{}`), func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+			for _, err := range proxy.Pages[map[string]json.RawMessage](t.Context(), "tools/list", "tools", json.RawMessage(`{}`), func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 				calls++
 				if calls > 2 {
 					t.Fatal("pagination did not stop")
