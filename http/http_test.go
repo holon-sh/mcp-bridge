@@ -571,7 +571,36 @@ func TestProxyProcess(t *testing.T) {
 		versions = strings.Split(value, ",")
 	}
 	server := fixtureServer(versions...)
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	var transport mcp.Transport = &mcp.StdioTransport{}
+	if value := os.Getenv("MCP_PROXY_DISCOVERY_ERROR"); value != "" {
+		rejected := &jsonrpc.Error{Message: "server/discover predates this server"}
+		_, _ = fmt.Sscan(value, &rejected.Code)
+		server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+				if method == "server/discover" {
+					return nil, rejected
+				}
+				return next(ctx, method, req)
+			}
+		})
+		// Like TypeScript SDK servers, reject a null _meta.
+		input, forward := io.Pipe()
+		go func() {
+			stdin := bufio.NewReader(os.Stdin)
+			for {
+				line, err := stdin.ReadBytes('\n')
+				if bytes.Contains(line, []byte(`"_meta":null`)) {
+					os.Exit(4)
+				}
+				if _, writeErr := forward.Write(line); err != nil || writeErr != nil {
+					forward.CloseWithError(err)
+					return
+				}
+			}
+		}()
+		transport = &mcp.IOTransport{Reader: input, Writer: os.Stdout}
+	}
+	if err := server.Run(context.Background(), transport); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -1068,6 +1097,43 @@ func TestStartRequiresDiscoveredVersion(t *testing.T) {
 	}, Options{ProtocolVersion: ProtocolVersion})
 	if err == nil {
 		t.Fatal("started a process that does not support the configured version")
+	}
+}
+
+func TestCurrentClientsReachLegacyProcess(t *testing.T) {
+	// The TypeScript and Go SDKs reject server/discover as an unknown method, the
+	// Python SDK as invalid params.
+	for _, code := range []int64{jsonrpc.CodeMethodNotFound, jsonrpc.CodeInvalidParams} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			b, err := Start(t.Context(), func() *exec.Cmd {
+				cmd := commandFactory()
+				cmd.Env = append(cmd.Env, fmt.Sprint("MCP_PROXY_DISCOVERY_ERROR=", code))
+				return cmd
+			}, Options{ProtocolVersion: ProtocolVersion})
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(b)
+			t.Cleanup(func() { b.Close(); server.Close() })
+			progress := make(chan any, 10)
+			options := clientOptions(progress)
+			// Clients open subscriptions/listen for list changes that discovery offers.
+			options.ToolListChangedHandler = func(context.Context, *mcp.ToolListChangedRequest) {}
+			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, options)
+			session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: server.URL + "/mcp"}, &mcp.ClientSessionOptions{ProtocolVersion: ProtocolVersion})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { session.Close() })
+			want := &mcp.ServerCapabilities{
+				Extensions: map[string]any{"io.modelcontextprotocol/ui": map[string]any{}},
+				Prompts:    &mcp.PromptCapabilities{}, Resources: &mcp.ResourceCapabilities{}, Tools: &mcp.ToolCapabilities{},
+			}
+			if result := session.InitializeResult(); result.ProtocolVersion != ProtocolVersion || result.ServerInfo.Name != "fixture" || !reflect.DeepEqual(result.Capabilities, want) {
+				t.Fatalf("discovery: %+v %+v", result, result.Capabilities)
+			}
+			exercise(t, session, false, false, progress)
+		})
 	}
 }
 
