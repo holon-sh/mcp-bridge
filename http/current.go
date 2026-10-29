@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -38,6 +39,9 @@ type currentBridge struct {
 	stopOnce sync.Once
 	stopping chan struct{}
 	done     chan struct{}
+
+	// discovery answers server/discover for a process that predates it.
+	discovery json.RawMessage
 }
 
 type call struct {
@@ -77,7 +81,13 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 	defer cancel()
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(version)})
 	result, err := b.request(probeCtx, "server/discover", params)
-	if err == nil {
+	if errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) || errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams}) {
+		// Servers that predate MCP 2026-07-28 reject server/discover: the TypeScript and
+		// Go SDKs as an unknown method, the Python SDK as invalid params. After a legacy
+		// initialize they answer current requests, ignoring protocol metadata they do
+		// not know.
+		err = b.initialize(probeCtx)
+	} else if err == nil {
 		var discovered mcp.DiscoverResult
 		err = json.Unmarshal(result, &discovered)
 		if err == nil && !slices.Contains(discovered.SupportedVersions, version) {
@@ -92,10 +102,37 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 	return b, nil
 }
 
+// initialize starts a legacy session with the process and records the discovery
+// result the bridge answers on its behalf.
+func (b *currentBridge) initialize(ctx context.Context) error {
+	versions := mcp.SupportedProtocolVersions()
+	params, _ := json.Marshal(&mcp.InitializeParams{
+		ProtocolVersion: versions[slices.IndexFunc(versions, proxy.IsLegacyVersion)],
+		ClientInfo:      clientInfo,
+		Capabilities:    &mcp.ClientCapabilities{},
+	})
+	result, err := b.request(ctx, "initialize", params)
+	if err != nil {
+		return fmt.Errorf("initialize legacy MCP server: %w", err)
+	}
+	var initialized mcp.InitializeResult
+	_ = json.Unmarshal(result, &initialized)
+	b.discovery, _ = json.Marshal(&mcp.DiscoverResult{
+		SupportedVersions: []string{ProtocolVersion},
+		Capabilities:      translate.Capabilities(initialized.Capabilities),
+		Instructions:      initialized.Instructions,
+		Meta:              mcp.Meta{mcp.MetaKeyServerInfo: initialized.ServerInfo},
+		Cacheable:         mcp.Cacheable{CacheScope: "private"},
+	})
+	return b.write(ctx, &jsonrpc.Request{Method: "notifications/initialized"})
+}
+
+var clientInfo = &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.2"}
+
 func clientMeta(version string) mcp.Meta {
 	return mcp.Meta{
 		mcp.MetaKeyProtocolVersion:    version,
-		mcp.MetaKeyClientInfo:         &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.2"},
+		mcp.MetaKeyClientInfo:         clientInfo,
 		mcp.MetaKeyClientCapabilities: map[string]any{},
 	}
 }
@@ -133,8 +170,8 @@ func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request) (*call,
 	c := &call{id: rand.Text(), original: req.ID, progress: meta["progressToken"], messages: make(chan delivery, 8)}
 	if c.progress != nil {
 		meta["progressToken"], _ = json.Marshal(c.id)
+		params["_meta"], _ = json.Marshal(meta)
 	}
-	params["_meta"], _ = json.Marshal(meta)
 	raw, _ := json.Marshal(params)
 	id, _ := jsonrpc.MakeID(c.id)
 	b.mu.Lock()
@@ -144,6 +181,10 @@ func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request) (*call,
 	}
 	b.pending[c.id] = c
 	b.mu.Unlock()
+	if req.Method == "server/discover" && b.discovery != nil {
+		b.route(&jsonrpc.Response{ID: id, Result: b.discovery})
+		return c, nil
+	}
 	if err := b.write(ctx, &jsonrpc.Request{ID: id, Method: req.Method, Params: raw}); err != nil {
 		b.finish(c, false)
 		return nil, err
