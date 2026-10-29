@@ -1089,17 +1089,6 @@ func TestLegacyNotificationsBeforeGET(t *testing.T) {
 	t.Fatalf("early notifications lost: %v %v", seen, scanner.Err())
 }
 
-func TestStartRequiresDiscoveredVersion(t *testing.T) {
-	_, err := Start(t.Context(), func() *exec.Cmd {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestProcess$")
-		cmd.Env = append(os.Environ(), "BRIDGE_TEST_PROCESS=raw", "BRIDGE_TEST_VERSION=2099-01-01")
-		return cmd
-	}, Options{ProtocolVersion: ProtocolVersion})
-	if err == nil {
-		t.Fatal("started a process that does not support the configured version")
-	}
-}
-
 func TestCurrentClientsReachLegacyProcess(t *testing.T) {
 	// The TypeScript and Go SDKs reject server/discover as an unknown method, the
 	// Python SDK as invalid params.
@@ -1116,10 +1105,7 @@ func TestCurrentClientsReachLegacyProcess(t *testing.T) {
 			server := httptest.NewServer(b)
 			t.Cleanup(func() { b.Close(); server.Close() })
 			progress := make(chan any, 10)
-			options := clientOptions(progress)
-			// Clients open subscriptions/listen for list changes that discovery offers.
-			options.ToolListChangedHandler = func(context.Context, *mcp.ToolListChangedRequest) {}
-			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, options)
+			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, clientOptions(progress))
 			session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{Endpoint: server.URL + "/mcp"}, &mcp.ClientSessionOptions{ProtocolVersion: ProtocolVersion})
 			if err != nil {
 				t.Fatal(err)
@@ -1140,10 +1126,12 @@ func TestCurrentClientsReachLegacyProcess(t *testing.T) {
 func TestProtocolAdmission(t *testing.T) {
 	for _, test := range []struct {
 		name, configured, requested, upstream string
-		sse                                   bool
+		sse, raw                              bool
 	}{
 		{name: "unknown configuration", configured: "2099-01-01"},
 		{name: "current startup mismatch", configured: ProtocolVersion, upstream: "2025-11-25"},
+		// A process may also answer discovery without listing the version.
+		{name: "current startup discovery mismatch", configured: ProtocolVersion, upstream: "2099-01-01", raw: true},
 		{name: "current rejects legacy", configured: ProtocolVersion, requested: "2025-11-25"},
 		{name: "legacy negotiation mismatch", configured: "2025-11-25", requested: "2025-11-25", upstream: "2025-06-18"},
 		{name: "SSE negotiation mismatch", configured: "2025-11-25", requested: "2025-11-25", upstream: "2025-06-18", sse: true},
@@ -1153,7 +1141,10 @@ func TestProtocolAdmission(t *testing.T) {
 			defer cancel()
 			server, err := Start(ctx, func() *exec.Cmd {
 				cmd := commandFactory()
-				if test.upstream != "" {
+				if test.raw {
+					cmd = exec.Command(os.Args[0], "-test.run=^TestProcess$")
+					cmd.Env = append(os.Environ(), "BRIDGE_TEST_PROCESS=raw", "BRIDGE_TEST_VERSION="+test.upstream)
+				} else if test.upstream != "" {
 					cmd.Env = append(cmd.Env, "MCP_PROXY_VERSIONS="+test.upstream)
 				}
 				return cmd

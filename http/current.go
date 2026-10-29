@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -102,8 +103,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 }
 
 // initialize starts a legacy session with the process and records the discovery
-// result the bridge answers on its behalf. Discovery omits list-changed and
-// subscribe support, which current clients request through subscriptions/listen.
+// result the bridge answers on its behalf.
 func (b *currentBridge) initialize(ctx context.Context) error {
 	versions := mcp.SupportedProtocolVersions()
 	params, _ := json.Marshal(&mcp.InitializeParams{
@@ -117,32 +117,15 @@ func (b *currentBridge) initialize(ctx context.Context) error {
 	}
 	var initialized mcp.InitializeResult
 	_ = json.Unmarshal(result, &initialized)
-	legacy := cmp.Or(initialized.Capabilities, &mcp.ServerCapabilities{})
-	capabilities := &mcp.ServerCapabilities{Completions: legacy.Completions}
-	if settings, ok := legacy.Extensions[appExtension]; ok {
-		capabilities.Extensions = map[string]any{appExtension: settings}
-	}
-	if legacy.Tools != nil {
-		capabilities.Tools = &mcp.ToolCapabilities{}
-	}
-	if legacy.Prompts != nil {
-		capabilities.Prompts = &mcp.PromptCapabilities{}
-	}
-	if legacy.Resources != nil {
-		capabilities.Resources = &mcp.ResourceCapabilities{}
-	}
 	b.discovery, _ = json.Marshal(&mcp.DiscoverResult{
 		SupportedVersions: []string{ProtocolVersion},
-		Capabilities:      capabilities,
+		Capabilities:      translate.Capabilities(initialized.Capabilities),
 		Instructions:      initialized.Instructions,
 		Meta:              mcp.Meta{mcp.MetaKeyServerInfo: initialized.ServerInfo},
 		Cacheable:         mcp.Cacheable{CacheScope: "private"},
 	})
 	return b.write(ctx, &jsonrpc.Request{Method: "notifications/initialized"})
 }
-
-// appExtension is the MCP Apps extension, which works through plain resource reads.
-const appExtension = "io.modelcontextprotocol/ui"
 
 var clientInfo = &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.2"}
 

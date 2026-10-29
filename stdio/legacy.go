@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,15 +27,10 @@ func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downs
 	defer b.session.Close()
 	upstream := b.session.InitializeResult()
 	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.2"})
-	caps := &mcp.ServerCapabilities{Completions: upstream.Capabilities.Completions, Extensions: appExtension(upstream.Capabilities.Extensions)}
-	if upstream.Capabilities.Tools != nil {
-		caps.Tools = &mcp.ToolCapabilities{}
-	}
-	if upstream.Capabilities.Prompts != nil {
-		caps.Prompts = &mcp.PromptCapabilities{}
-	}
-	if upstream.Capabilities.Resources != nil {
-		caps.Resources = &mcp.ResourceCapabilities{Subscribe: upstream.Capabilities.Resources.Subscribe}
+	caps := translate.Capabilities(upstream.Capabilities)
+	if caps.Resources != nil {
+		// This bridge translates resource subscriptions.
+		caps.Resources.Subscribe = upstream.Capabilities.Resources.Subscribe
 	}
 	server := mcp.NewServer(info, &mcp.ServerOptions{
 		Instructions: upstream.Instructions,
@@ -84,13 +80,6 @@ type legacyBridge struct {
 	listens         map[jsonrpc.ID]*legacySubscription
 }
 
-func appExtension(extensions map[string]any) map[string]any {
-	if settings, ok := extensions["io.modelcontextprotocol/ui"]; ok {
-		return map[string]any{"io.modelcontextprotocol/ui": settings}
-	}
-	return nil
-}
-
 func (b *legacyBridge) connect(ctx context.Context, remote *mcp.StreamableClientTransport, params *mcp.InitializeParams) error {
 	upstream, err := connectRemote(ctx, remote)
 	if err != nil {
@@ -98,7 +87,7 @@ func (b *legacyBridge) connect(ctx context.Context, remote *mcp.StreamableClient
 	}
 	observer := &legacyUpstream{Connection: upstream, bridge: b}
 	client := mcp.NewClient(params.ClientInfo, &mcp.ClientOptions{
-		Capabilities:   &mcp.ClientCapabilities{Extensions: appExtension(params.Capabilities.Extensions)},
+		Capabilities:   &mcp.ClientCapabilities{Extensions: translate.AppExtension(params.Capabilities.Extensions)},
 		MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
 	})
 	client.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {

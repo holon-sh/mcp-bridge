@@ -20,9 +20,7 @@ curl -LsSf https://raw.githubusercontent.com/holon-sh/mcp-bridge/main/install.sh
 ### stdio to HTTP
 
 Launch the MCP server as a subprocess and serve streamable HTTP at `/mcp` and
-legacy SSE at `/sse`. Clients using MCP 2026-07-28 also reach servers that
-predate it: the bridge initializes them with the legacy handshake and answers
-`server/discover` itself.
+legacy SSE at `/sse`.
 
 ```mermaid
 flowchart LR
