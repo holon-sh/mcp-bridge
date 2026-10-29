@@ -26,7 +26,7 @@ func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downs
 	}
 	defer b.session.Close()
 	upstream := b.session.InitializeResult()
-	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.2"})
+	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.3"})
 	caps := translate.Capabilities(upstream.Capabilities)
 	if caps.Resources != nil {
 		// This bridge translates resource subscriptions.
