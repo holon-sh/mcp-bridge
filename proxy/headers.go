@@ -245,9 +245,13 @@ func ValidateProtocolHeader(headers http.Header, expected string) *jsonrpc.Error
 }
 
 // ValidateHeaders checks that MCP headers match req and the expected protocol
-// version. req must be non-nil. It returns nil on success or a protocol error
+// version under the [standard request headers] and [server validation] rules.
+// req must be non-nil. It returns nil on success or a protocol error
 // describing the mismatch. Tool argument headers require
 // [ValidateArgumentHeaders] separately.
+//
+// [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
+// [server validation]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
 func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
 	if issue := ValidateProtocolHeader(headers, expected); issue != nil {
 		return issue
@@ -276,7 +280,7 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	if issue != nil {
 		return issue
 	}
-	if value, _ := HeaderValue(headers, "Mcp-Name"); value != name {
+	if value, _ := HeaderValue(headers, "Mcp-Name"); value != name || name == "" && len(headers.Values("Mcp-Name")) != 0 {
 		return Mismatch("Mcp-Name")
 	}
 	return nil

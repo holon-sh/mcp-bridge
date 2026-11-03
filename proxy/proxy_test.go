@@ -37,6 +37,8 @@ func TestValidateHeaders(t *testing.T) {
 		{name: "duplicate method", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}},
 		{name: "missing name", method: "tools/call", params: `{` + meta(version, info, capabilities) + `}`},
 		{name: "unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo"}}},
+		{name: "duplicate unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo", "echo"}}},
+		{name: "empty unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {""}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {test.method}}
