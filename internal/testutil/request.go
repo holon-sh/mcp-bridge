@@ -29,11 +29,8 @@ func Request(t *testing.T, method string, params map[string]any) *http.Request {
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
 	req.Header.Set("Mcp-Method", method)
-	switch method {
-	case "tools/call", "prompts/get":
+	if method == "tools/call" {
 		req.Header.Set("Mcp-Name", fmt.Sprint(params["name"]))
-	case "resources/read":
-		req.Header.Set("Mcp-Name", fmt.Sprint(params["uri"]))
 	}
 	return req
 }

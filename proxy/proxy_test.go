@@ -1,6 +1,7 @@
 package proxy_test
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,23 +28,25 @@ func TestValidateHeaders(t *testing.T) {
 		valid                bool
 	}{
 		{name: "call", method: "tools/call", params: `{"name":"echo",` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo"}}, valid: true},
-		{name: "list", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, valid: true},
-		{name: "missing version header", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Protocol-Version": nil}},
-		{name: "metadata version", method: "tools/list", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`},
-		{name: "client name", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`},
-		{name: "malformed client info", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1","icons":1}`, capabilities) + `}`},
-		{name: "client version", method: "tools/list", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client"}`, capabilities) + `}`},
-		{name: "client capabilities", method: "tools/list", params: `{` + meta(version, info) + `}`},
-		{name: "duplicate method", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}},
-		{name: "missing name", method: "tools/call", params: `{` + meta(version, info, capabilities) + `}`},
-		{name: "unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo"}}},
-		{name: "duplicate unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"echo", "echo"}}},
-		{name: "empty unexpected name", method: "tools/list", params: `{` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {""}}},
+		{name: "list", valid: true},
+		{name: "missing version header", headers: http.Header{"Mcp-Protocol-Version": nil}},
+		{name: "metadata version", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`},
+		{name: "client name", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`},
+		{name: "malformed client info", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1","icons":1}`, capabilities) + `}`},
+		{name: "client version", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client"}`, capabilities) + `}`},
+		{name: "client capabilities", params: `{` + meta(version, info) + `}`},
+		{name: "duplicate method", headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}},
+		{name: "missing name", method: "tools/call"},
+		{name: "unexpected name", headers: http.Header{"Mcp-Name": {"echo"}}},
+		{name: "duplicate unexpected name", headers: http.Header{"Mcp-Name": {"echo", "echo"}}},
+		{name: "empty unexpected name", headers: http.Header{"Mcp-Name": {""}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {test.method}}
+			method := cmp.Or(test.method, "tools/list")
+			params := cmp.Or(test.params, `{`+meta(version, info, capabilities)+`}`)
+			headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {method}}
 			maps.Copy(headers, test.headers)
-			if err := proxy.ValidateHeaders(headers, &jsonrpc.Request{Method: test.method, Params: json.RawMessage(test.params)}, proxy.CurrentVersion); (err == nil) != test.valid {
+			if err := proxy.ValidateHeaders(headers, &jsonrpc.Request{Method: method, Params: json.RawMessage(params)}, proxy.CurrentVersion); (err == nil) != test.valid {
 				t.Fatalf("ValidateHeaders = %v", err)
 			}
 		})
