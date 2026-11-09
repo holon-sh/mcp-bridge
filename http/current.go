@@ -127,7 +127,7 @@ func (b *currentBridge) initialize(ctx context.Context) error {
 	return b.write(ctx, &jsonrpc.Request{Method: "notifications/initialized"})
 }
 
-var clientInfo = &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.4"}
+var clientInfo = &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.5"}
 
 func clientMeta(version string) mcp.Meta {
 	return mcp.Meta{
