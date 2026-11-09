@@ -24,7 +24,7 @@ import (
 // The current handler must return JSON for tools/list. Tool responses, including
 // streams and HTTP authorization failures, pass through unchanged.
 // Legacy clients cannot receive server-initiated requests or subscriptions.
-func WithLegacyTools(next http.Handler, info *mcp.Implementation) http.Handler {
+func WithLegacyTools(next http.Handler, catalog func(tool string) http.Handler, info *mcp.Implementation) http.Handler {
 	server := mcp.NewServer(info, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}})
 	lifecycle := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	origins := http.NewCrossOriginProtection()
@@ -55,7 +55,7 @@ func WithLegacyTools(next http.Handler, info *mcp.Implementation) http.Handler {
 		case "", "initialize", "ping":
 			lifecycle.ServeHTTP(w, r)
 		case "tools/list", "tools/call":
-			forwardLegacyTool(w, r, next, request)
+			forwardLegacyTool(w, r, next, catalog, request)
 		default:
 			WriteError(w, 404, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not supported by the sessionless tools bridge"})
 		}
@@ -64,7 +64,11 @@ func WithLegacyTools(next http.Handler, info *mcp.Implementation) http.Handler {
 
 var legacyHTTPVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
 
-func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
+func LegacyToolsVersions() []string {
+	return slices.Clone(legacyHTTPVersions)
+}
+
+func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler, catalog func(string) http.Handler, request *jsonrpc.Request) {
 	params := map[string]json.RawMessage{}
 	var meta map[string]json.RawMessage
 	if _ = json.Unmarshal(request.Params, &params); params == nil {
@@ -76,6 +80,8 @@ func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler
 	_ = json.Unmarshal(bridge, &meta)
 	params["_meta"], _ = json.Marshal(meta)
 	request.Params, _ = json.Marshal(params)
+	var tool string
+	_ = json.Unmarshal(params["name"], &tool)
 	r = r.Clone(r.Context())
 	maps.DeleteFunc(r.Header, func(key string, _ []string) bool { return strings.HasPrefix(strings.ToLower(key), "mcp-") })
 	r.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
@@ -85,7 +91,7 @@ func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler
 		query.Header.Set("Mcp-Method", method)
 		setBody(query, &jsonrpc.Request{ID: request.ID, Method: method, Params: params})
 		response := httptest.NewRecorder()
-		next.ServeHTTP(response, query)
+		catalog(tool).ServeHTTP(response, query)
 		message, _ := jsonrpc.DecodeMessage(response.Body.Bytes())
 		if reply, ok := message.(*jsonrpc.Response); ok && reply.Error == nil {
 			return reply.Result, nil
