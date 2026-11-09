@@ -21,21 +21,18 @@ import (
 // WithLegacyTools adds sessionless 2025 Streamable HTTP clients to a current
 // tools-only handler. Authentication must wrap this handler. Each translated
 // request retains its own context and credentials; no session IDs are issued.
-// Each tools/call first sends tools/list to the handler that catalog returns for
-// the called tool's name, to find its x-mcp-header arguments; that handler may
-// list only the tools that could match. Catalog handlers and the current handler
-// must return JSON for tools/list. Tool responses, including streams and HTTP
-// authorization failures, pass through unchanged.
+// The current handler must return JSON for tools/list. Tool responses, including
+// streams and HTTP authorization failures, pass through unchanged.
 // Legacy clients cannot receive server-initiated requests or subscriptions.
 func WithLegacyTools(next http.Handler, catalog func(tool string) http.Handler, info *mcp.Implementation) http.Handler {
-	server := mcp.NewServer(info, &mcp.ServerOptions{SupportedProtocolVersions: LegacyToolsVersions(), Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}})
+	server := mcp.NewServer(info, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}})
 	lifecycle := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	origins := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A request without a [protocol version header] uses 2025-03-26.
 		//
 		// [protocol version header]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
-		if !slices.Contains(LegacyToolsVersions(), cmp.Or(r.Header.Get("Mcp-Protocol-Version"), "2025-03-26")) {
+		if !slices.Contains(legacyHTTPVersions, cmp.Or(r.Header.Get("Mcp-Protocol-Version"), "2025-03-26")) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -65,9 +62,10 @@ func WithLegacyTools(next http.Handler, catalog func(tool string) http.Handler, 
 	})
 }
 
-// LegacyToolsVersions returns the MCP revisions that [WithLegacyTools] serves.
+var legacyHTTPVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
+
 func LegacyToolsVersions() []string {
-	return []string{"2025-11-25", "2025-06-18", "2025-03-26"}
+	return slices.Clone(legacyHTTPVersions)
 }
 
 func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler, catalog func(string) http.Handler, request *jsonrpc.Request) {
@@ -84,6 +82,7 @@ func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler
 	request.Params, _ = json.Marshal(params)
 	var tool string
 	_ = json.Unmarshal(params["name"], &tool)
+	lookup := catalog(tool)
 	r = r.Clone(r.Context())
 	maps.DeleteFunc(r.Header, func(key string, _ []string) bool { return strings.HasPrefix(strings.ToLower(key), "mcp-") })
 	r.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
@@ -93,7 +92,7 @@ func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler
 		query.Header.Set("Mcp-Method", method)
 		setBody(query, &jsonrpc.Request{ID: request.ID, Method: method, Params: params})
 		response := httptest.NewRecorder()
-		catalog(tool).ServeHTTP(response, query)
+		lookup.ServeHTTP(response, query)
 		message, _ := jsonrpc.DecodeMessage(response.Body.Bytes())
 		if reply, ok := message.(*jsonrpc.Response); ok && reply.Error == nil {
 			return reply.Result, nil

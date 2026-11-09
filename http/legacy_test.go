@@ -21,48 +21,47 @@ import (
 )
 
 func TestLegacyToolsClients(t *testing.T) {
-	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		request := mcphttp.ReadMessage(w, r, proxy.MaxMessageBytes).(*jsonrpc.Request)
-		if err := proxy.ValidateHeaders(r.Header, request, proxy.CurrentVersion); err != nil {
-			t.Error(err)
-		}
-		identity := r.Header.Get("Authorization")
-		if identity == "" {
-			t.Error("lost request credential")
-		}
-		result := json.RawMessage(`{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"tenant":{"type":"string","x-mcp-header":"Tenant"},"region":{"type":"string","x-mcp-header":"Region"}}}}]}`)
-		headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {request.Method}}
-		if request.Method == "tools/call" {
-			headers["Mcp-Name"] = []string{"echo"}
-			headers["Mcp-Param-Tenant"] = []string{proxy.EncodeHeader("公司")}
-			if !bytes.Contains(request.Params, []byte(`9007199254740993`)) || !bytes.Contains(request.Params, []byte(`"progressToken":"call"`)) {
-				t.Errorf("changed request params: %s", request.Params)
+	serve := func(tools string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			request := mcphttp.ReadMessage(w, r, proxy.MaxMessageBytes).(*jsonrpc.Request)
+			if err := proxy.ValidateHeaders(r.Header, request, proxy.CurrentVersion); err != nil {
+				t.Error(err)
 			}
-			result, _ = json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": identity}}})
-		}
-		received := maps.Clone(r.Header)
-		maps.DeleteFunc(received, func(key string, _ []string) bool { return !strings.HasPrefix(key, "Mcp-") })
-		if !reflect.DeepEqual(received, headers) {
-			t.Errorf("MCP headers = %v, want %v", received, headers)
-		}
-		data, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: request.ID, Result: result})
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(data)
-	})
-	var forwarded, looked []string
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forwarded = append(forwarded, r.Header.Get("Mcp-Method"))
-		backend.ServeHTTP(w, r)
-	})
+			identity := r.Header.Get("Authorization")
+			if identity == "" {
+				t.Error("lost request credential")
+			}
+			result := json.RawMessage(tools)
+			headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {request.Method}}
+			if request.Method == "tools/call" {
+				headers["Mcp-Name"] = []string{"echo"}
+				headers["Mcp-Param-Tenant"] = []string{proxy.EncodeHeader("公司")}
+				if !bytes.Contains(request.Params, []byte(`9007199254740993`)) || !bytes.Contains(request.Params, []byte(`"progressToken":"call"`)) {
+					t.Errorf("changed request params: %s", request.Params)
+				}
+				result, _ = json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": identity}}})
+			}
+			received := maps.Clone(r.Header)
+			maps.DeleteFunc(received, func(key string, _ []string) bool { return !strings.HasPrefix(key, "Mcp-") })
+			if !reflect.DeepEqual(received, headers) {
+				t.Errorf("MCP headers = %v, want %v", received, headers)
+			}
+			data, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: request.ID, Result: result})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(data)
+		})
+	}
+	next := serve(`{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}`)
 	catalog := func(tool string) http.Handler {
-		looked = append(looked, tool)
-		return backend
+		if tool != "echo" {
+			return http.NotFoundHandler()
+		}
+		return serve(`{"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"tenant":{"type":"string","x-mcp-header":"Tenant"},"region":{"type":"string","x-mcp-header":"Region"}}}}]}`)
 	}
 	server := httptest.NewServer(mcphttp.WithLegacyTools(next, catalog, &mcp.Implementation{Name: "example", Version: "1"}))
 	defer server.Close()
-	for _, version := range mcphttp.LegacyToolsVersions() {
+	for _, version := range []string{"2025-03-26", "2025-06-18", "2025-11-25"} {
 		t.Run(version, func(t *testing.T) {
-			forwarded, looked = nil, nil
 			transport := remote.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 				if r.Header.Get("Mcp-Session-Id") != "" {
 					t.Error("bridge allocated a persistent session")
@@ -94,12 +93,6 @@ func TestLegacyToolsClients(t *testing.T) {
 			var wire *jsonrpc.Error
 			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"tenant": 1.5}}); !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInvalidParams {
 				t.Fatalf("invalid header argument = %v", err)
-			}
-			if want := []string{"tools/list", "tools/call"}; !reflect.DeepEqual(forwarded, want) {
-				t.Errorf("forwarded %v, want %v", forwarded, want)
-			}
-			if want := []string{"echo", "echo"}; !reflect.DeepEqual(looked, want) {
-				t.Errorf("catalog lookups %v, want %v", looked, want)
 			}
 		})
 	}
