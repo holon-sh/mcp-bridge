@@ -49,10 +49,20 @@ func TestLegacyToolsClients(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
 	})
-	server := httptest.NewServer(mcphttp.WithLegacyTools(backend, &mcp.Implementation{Name: "example", Version: "1"}))
+	var forwarded, looked []string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = append(forwarded, r.Header.Get("Mcp-Method"))
+		backend.ServeHTTP(w, r)
+	})
+	catalog := func(tool string) http.Handler {
+		looked = append(looked, tool)
+		return backend
+	}
+	server := httptest.NewServer(mcphttp.WithLegacyTools(next, catalog, &mcp.Implementation{Name: "example", Version: "1"}))
 	defer server.Close()
-	for _, version := range []string{"2025-03-26", "2025-06-18", "2025-11-25"} {
+	for _, version := range mcphttp.LegacyToolsVersions() {
 		t.Run(version, func(t *testing.T) {
+			forwarded, looked = nil, nil
 			transport := remote.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
 				if r.Header.Get("Mcp-Session-Id") != "" {
 					t.Error("bridge allocated a persistent session")
@@ -85,6 +95,12 @@ func TestLegacyToolsClients(t *testing.T) {
 			if _, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"tenant": 1.5}}); !errors.As(err, &wire) || wire.Code != jsonrpc.CodeInvalidParams {
 				t.Fatalf("invalid header argument = %v", err)
 			}
+			if want := []string{"tools/list", "tools/call"}; !reflect.DeepEqual(forwarded, want) {
+				t.Errorf("forwarded %v, want %v", forwarded, want)
+			}
+			if want := []string{"echo", "echo"}; !reflect.DeepEqual(looked, want) {
+				t.Errorf("catalog lookups %v, want %v", looked, want)
+			}
 		})
 	}
 }
@@ -110,11 +126,12 @@ func TestLegacyToolsBoundaries(t *testing.T) {
 		{name: "catalog JSON-RPC error", method: "POST", version: "2025-06-18", body: call, upstream: 200, reply: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"session inactive","data":{"retry":false}}}`, status: 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := mcphttp.WithLegacyTools(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("WWW-Authenticate", tc.challenge)
 				w.WriteHeader(cmp.Or(tc.upstream, http.StatusTeapot))
 				io.WriteString(w, tc.reply)
-			}), &mcp.Implementation{Name: "test", Version: "1"})
+			})
+			handler := mcphttp.WithLegacyTools(upstream, func(string) http.Handler { return upstream }, &mcp.Implementation{Name: "test", Version: "1"})
 			r := httptest.NewRequest(tc.method, "https://example.test/mcp", strings.NewReader(tc.body))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Accept", "application/json, text/event-stream")
