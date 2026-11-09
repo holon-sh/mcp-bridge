@@ -223,16 +223,44 @@ func ValidateProtocolHeader(headers http.Header, expected string) *jsonrpc.Error
 	return nil
 }
 
-// ValidateHeaders checks that MCP headers match req and the expected protocol
-// version under the [standard request headers] and [server validation] rules.
-// req must be non-nil. It returns nil on success or a protocol error
-// describing the mismatch. Tool argument headers require
-// [ValidateArgumentHeaders] separately.
+// ParseHeaders checks the [standard request headers] of a request without its
+// body, for intermediaries that route on them. It returns the method and the
+// decoded name, empty for methods without one, or a protocol error describing
+// the invalid header.
 //
 // [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
+func ParseHeaders(headers http.Header, expected string) (method, name string, issue *jsonrpc.Error) {
+	if issue := ValidateProtocolHeader(headers, expected); issue != nil {
+		return "", "", issue
+	}
+	if headers.Get("Mcp-Protocol-Version") == "" {
+		return "", "", Mismatch("Mcp-Protocol-Version")
+	}
+	if len(headers.Values("Mcp-Method")) != 1 {
+		return "", "", Mismatch("Mcp-Method")
+	}
+	method = headers.Get("Mcp-Method")
+	if _, named := nameFields[method]; !named {
+		if len(headers.Values("Mcp-Name")) != 0 {
+			return "", "", Mismatch("Mcp-Name")
+		}
+		return method, "", nil
+	}
+	if name, err := HeaderValue(headers, "Mcp-Name"); err == nil && name != "" {
+		return method, name, nil
+	}
+	return "", "", Mismatch("Mcp-Name")
+}
+
+// ValidateHeaders checks that the headers accepted by [ParseHeaders] match req
+// under the [server validation] rules. req must be non-nil. It returns nil on
+// success or a protocol error describing the mismatch. Tool argument headers
+// require [ValidateArgumentHeaders] separately.
+//
 // [server validation]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
 func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
-	if issue := ValidateProtocolHeader(headers, expected); issue != nil {
+	method, name, issue := ParseHeaders(headers, expected)
+	if issue != nil {
 		return issue
 	}
 	var params, meta map[string]json.RawMessage
@@ -240,7 +268,7 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	_ = json.Unmarshal(params["_meta"], &meta)
 	var version string
 	_ = json.Unmarshal(meta[mcp.MetaKeyProtocolVersion], &version)
-	if headers.Get("Mcp-Protocol-Version") == "" || version != expected {
+	if version != expected {
 		return Mismatch("Mcp-Protocol-Version")
 	}
 	var info mcp.Implementation
@@ -249,14 +277,14 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	if json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info) != nil || info.Name == "" || info.Version == "" || capabilities == nil {
 		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "clientInfo and clientCapabilities are required"}
 	}
-	if len(headers.Values("Mcp-Method")) != 1 || headers.Get("Mcp-Method") != req.Method {
+	if method != req.Method {
 		return Mismatch("Mcp-Method")
 	}
-	name, issue := requestName(req.Method, params)
+	body, issue := requestName(method, params)
 	if issue != nil {
 		return issue
 	}
-	if ValidateArgumentHeaders(headers, []HeaderArgument{name}) != nil {
+	if body.value != nil && body.value != name {
 		return Mismatch("Mcp-Name")
 	}
 	return nil
