@@ -5,6 +5,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge)
 [![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/holon-sh/mcp-bridge/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://holon-labs.dev/discord/)
 
 A Go library and CLI that forwards MCP between stdio and HTTP using the
 [official Go MCP SDK](https://github.com/modelcontextprotocol/go-sdk).
@@ -260,3 +261,7 @@ err := proxy.Relay(ctx, upstream, downstream)
 
 Both connections close when forwarding ends. See the
 [API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) for details.
+
+## Community
+
+Ask questions and share what you're building on the [Holon Discord](https://holon-labs.dev/discord/).
