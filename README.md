@@ -1,9 +1,7 @@
 # mcp-bridge
 
 [![CI](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/holon-sh/mcp-bridge/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8?logo=go)](https://go.dev/doc/install)
 [![Go Reference](https://pkg.go.dev/badge/github.com/holon-sh/mcp-bridge.svg)](https://pkg.go.dev/github.com/holon-sh/mcp-bridge)
-[![Downloads](https://img.shields.io/badge/releases-download-blue)](https://github.com/holon-sh/mcp-bridge/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 A Go library and CLI that forwards MCP between stdio and HTTP using the
@@ -35,26 +33,6 @@ flowchart LR
 mcp-bridge serve --listen 127.0.0.1:8080 -- /path/to/mcp-server --stdio
 ```
 
-<details open>
-<summary><code>mcp-bridge serve --help</code></summary>
-
-```text
-Expose a stdio MCP server over Streamable HTTP and legacy SSE
-
-Usage:
-  mcp-bridge serve [flags] -- SERVER [ARG...]
-
-Flags:
-      --allow-origin origin       Trusted browser origin (repeatable)
-      --cwd string                Server working directory
-      --env KEY=VALUE             Server environment override KEY=VALUE (repeatable)
-  -h, --help                      help for serve
-      --listen string             HTTP listening address (default "127.0.0.1:8080")
-      --protocol-version string   Require one MCP protocol version (default: automatic negotiation)
-```
-
-</details>
-
 ### HTTP to stdio
 
 Launch the bridge as a subprocess and expose a remote streamable HTTP or legacy
@@ -74,92 +52,30 @@ mcp-bridge connect --transport sse https://example.com/sse
 mcp-bridge connect --header 'Authorization: Bearer example' https://example.com/mcp
 ```
 
-<details open>
-<summary><code>mcp-bridge connect --help</code></summary>
-
-```text
-Expose a remote Streamable HTTP or legacy SSE MCP server over stdio
-
-Usage:
-  mcp-bridge connect [flags] URL
-
-Flags:
-      --header header      Remote header as Name: value (repeatable)
-  -h, --help               help for connect
-      --transport string   Remote transport: streamable-http or sse (default "streamable-http")
-```
-
-</details>
-
 ## MCP client configuration
 
 For clients using an `mcpServers` configuration:
 
-<details open>
-<summary><h4>Connect a stdio client to a streamable HTTP server</h4></summary>
-
 ```json
 {
   "mcpServers": {
     "example-mcp": {
       "command": "mcp-bridge",
-      "args": ["connect", "https://example.com/mcp"]
+      "args": ["connect", "https://example.com/mcp", "--header", "Authorization: Bearer TOKEN"]
     }
   }
 }
 ```
-
-</details>
-
-<details open>
-<summary><h4>Connect to a legacy SSE server</h4></summary>
-
-```json
-{
-  "mcpServers": {
-    "example-mcp": {
-      "command": "mcp-bridge",
-      "args": ["connect", "--transport", "sse", "https://example.com/sse"]
-    }
-  }
-}
-```
-
-</details>
-
-<details open>
-<summary><h4>Include authentication and an additional HTTP header</h4></summary>
-
-```json
-{
-  "mcpServers": {
-    "example-mcp": {
-      "command": "mcp-bridge",
-      "args": [
-        "connect", "https://example.com/mcp",
-        "--header", "Authorization: Bearer TOKEN",
-        "--header", "X-Tenant: example"
-      ]
-    }
-  }
-}
-```
-
-</details>
 
 ## Go API
 
 ```sh
-go get github.com/holon-sh/mcp-bridge@v0.0.6
+go get github.com/holon-sh/mcp-bridge@latest
 ```
-
-This repository provides these Go packages:
 
 - [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/http) serves stdio MCP servers over HTTP.
 - [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
 - [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
-
-They run inside your Go program without invoking the CLI.
 
 ### stdio to HTTP
 
@@ -199,9 +115,6 @@ func serve(ctx context.Context) error {
 
 ### HTTP to stdio
 
-<details open>
-<summary><h4>Streamable HTTP</h4></summary>
-
 ```go
 import (
     "context"
@@ -222,41 +135,15 @@ func connect(ctx context.Context, token string) error {
 }
 ```
 
-</details>
-
-<details open>
-<summary><h4>Legacy SSE</h4></summary>
-
-```go
-import (
-    "context"
-
-    mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
-    "github.com/modelcontextprotocol/go-sdk/mcp"
-    "golang.org/x/oauth2"
-)
-
-func connectSSE(ctx context.Context, token string) error {
-    client := oauth2.NewClient(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
-    return mcpbridge.Run(ctx,
-        &mcp.SSEClientTransport{Endpoint: "https://example.com/sse", HTTPClient: client},
-        &mcp.StdioTransport{},
-    )
-}
-```
-
-</details>
+For a legacy SSE server, use `mcp.SSEClientTransport` instead.
 
 ### Custom proxies
 
-Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) to forward
-messages between existing MCP connections, list tools across pages, or handle MCP
-HTTP headers in your own bridge. For example, relay an upstream server connection
-to a downstream client connection:
+Use [`proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) to relay
+between existing MCP connections, page through tools, or encode MCP HTTP headers:
 
 ```go
 err := proxy.Relay(ctx, upstream, downstream)
 ```
 
-Both connections close when forwarding ends. See the
-[API reference](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) for details.
+Both connections close when forwarding ends.
