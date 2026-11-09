@@ -82,7 +82,6 @@ func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler
 	request.Params, _ = json.Marshal(params)
 	var tool string
 	_ = json.Unmarshal(params["name"], &tool)
-	lookup := catalog(tool)
 	r = r.Clone(r.Context())
 	maps.DeleteFunc(r.Header, func(key string, _ []string) bool { return strings.HasPrefix(strings.ToLower(key), "mcp-") })
 	r.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
@@ -92,7 +91,7 @@ func forwardLegacyTool(w http.ResponseWriter, r *http.Request, next http.Handler
 		query.Header.Set("Mcp-Method", method)
 		setBody(query, &jsonrpc.Request{ID: request.ID, Method: method, Params: params})
 		response := httptest.NewRecorder()
-		lookup.ServeHTTP(response, query)
+		catalog(tool).ServeHTTP(response, query)
 		message, _ := jsonrpc.DecodeMessage(response.Body.Bytes())
 		if reply, ok := message.(*jsonrpc.Response); ok && reply.Error == nil {
 			return reply.Result, nil
