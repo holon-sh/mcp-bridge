@@ -21,11 +21,10 @@ import (
 )
 
 // WithLegacyClients lets clients of the 2025 Streamable HTTP protocol versions
-// use next, a handler for the current version, without sessions. They can
-// initialize and use next's tools, resources, prompts and completions; next
-// receives each of their requests as a current request with the same
-// credentials. catalog(tool) must answer tools/list with the named tool's
-// definition. Current requests reach next unchanged.
+// use next, a handler for the current version, without sessions. next receives
+// each of their requests as a current request with the same credentials.
+// catalog(tool) must answer tools/list with the named tool's definition.
+// Current requests reach next unchanged.
 //
 // Authentication must wrap this handler. A 2025 request body larger than
 // maxMessageBytes is rejected. Responses from next, including streams and
@@ -63,10 +62,8 @@ func WithLegacyClients(next http.Handler, catalog func(tool string) http.Handler
 			lifecycle.ServeHTTP(w, r)
 		case "initialize":
 			initializeLegacy(w, r, next, request)
-		case "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read", "prompts/list", "prompts/get", "completion/complete":
-			forwardLegacy(w, r, next, catalog, request)
 		default:
-			WriteError(w, 404, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not supported by the sessionless bridge"})
+			forwardLegacy(w, r, next, catalog, request)
 		}
 	})
 }
