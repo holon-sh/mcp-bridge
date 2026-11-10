@@ -81,7 +81,6 @@ func legacyLifecycle(server *mcp.Server) http.Handler {
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 }
 
-// initializeLegacy answers initialize with what server/discover reports.
 func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(proxy.CurrentVersion)})
 	result, err := query(w, r, next, request.ID, "server/discover", params)
@@ -134,9 +133,6 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, ca
 
 var errAnswered = errors.New("answered by the current handler")
 
-// query sends handler a current request for method with r's credentials and
-// returns its result. Otherwise it relays handler's answer to w, or reports an
-// unreadable one, and returns errAnswered.
 func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id jsonrpc.ID, method string, params json.RawMessage) (json.RawMessage, error) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, currentRequest(r.Context(), r, &jsonrpc.Request{ID: id, Method: method, Params: params}))
@@ -154,8 +150,6 @@ func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id json
 	return nil, errAnswered
 }
 
-// currentRequest returns a copy of r that carries request with the current
-// protocol version and no other MCP headers.
 func currentRequest(ctx context.Context, r *http.Request, request *jsonrpc.Request) *http.Request {
 	r = r.Clone(ctx)
 	maps.DeleteFunc(r.Header, func(key string, _ []string) bool { return strings.HasPrefix(strings.ToLower(key), "mcp-") })
@@ -171,8 +165,6 @@ func setBody(r *http.Request, request *jsonrpc.Request) {
 	r.ContentLength = int64(len(body))
 }
 
-// recordedReply returns the JSON-RPC response in a successful reply, sent as
-// JSON or as an event stream, or nil if there is none.
 func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 	if response.Code != http.StatusOK {
 		return nil
@@ -181,9 +173,6 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 	if media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type")); media != "text/event-stream" {
 		return decodeResponse(body)
 	}
-	// An [event's data] is its data fields joined by newlines.
-	//
-	// [event's data]: https://html.spec.whatwg.org/multipage/server-sent-events.html#dispatchMessage
 	var data []byte
 	for line := range bytes.Lines(body) {
 		if line = bytes.TrimRight(line, "\r\n"); len(line) == 0 {
