@@ -1,7 +1,6 @@
 package mcphttp
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -141,11 +140,10 @@ func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler,
 		WriteError(w, 502, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid discovery response"})
 		return
 	}
-	var info *mcp.Implementation
-	if raw, err := json.Marshal(discovered.Meta[mcp.MetaKeyServerInfo]); err == nil {
-		_ = json.Unmarshal(raw, &info)
-	}
-	if info == nil || info.Name == "" {
+	info := &mcp.Implementation{}
+	raw, _ := json.Marshal(discovered.Meta[mcp.MetaKeyServerInfo])
+	_ = json.Unmarshal(raw, info)
+	if info.Name == "" {
 		info = clientInfo
 	}
 	legacyLifecycle(mcp.NewServer(info, &mcp.ServerOptions{
@@ -211,14 +209,11 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 	}
 	media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type"))
 	if media != "text/event-stream" {
-		reply, _ := decodeResponse(response.Body.Bytes())
-		return reply
+		return decodeResponse(response.Body.Bytes())
 	}
-	lines := bufio.NewScanner(bytes.NewReader(response.Body.Bytes()))
-	lines.Buffer(nil, proxy.MaxMessageBytes)
-	for lines.Scan() {
-		if data, ok := bytes.CutPrefix(lines.Bytes(), []byte("data:")); ok {
-			if reply, _ := decodeResponse(data); reply != nil {
+	for line := range bytes.Lines(response.Body.Bytes()) {
+		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			if reply := decodeResponse(data); reply != nil {
 				return reply
 			}
 		}
@@ -226,10 +221,10 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 	return nil
 }
 
-func decodeResponse(data []byte) (*jsonrpc.Response, error) {
-	message, err := jsonrpc.DecodeMessage(bytes.TrimSpace(data))
+func decodeResponse(data []byte) *jsonrpc.Response {
+	message, _ := jsonrpc.DecodeMessage(bytes.TrimSpace(data))
 	reply, _ := message.(*jsonrpc.Response)
-	return reply, err
+	return reply
 }
 
 func relay(w http.ResponseWriter, response *httptest.ResponseRecorder) {
@@ -317,7 +312,7 @@ func (w *legacyResults) finish() error {
 		_, err := w.ResponseWriter.Write(data)
 		return err
 	}
-	reply, _ := decodeResponse(payload)
+	reply := decodeResponse(payload)
 	var result struct {
 		ResultType string `json:"resultType"`
 	}
