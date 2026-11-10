@@ -20,23 +20,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// WithLegacyClients adds sessionless 2025 Streamable HTTP clients to next, a
-// current handler. It answers initialize from next's server/discover result and
-// forwards the tools, resources, prompts and completion methods as current
-// requests, with the request metadata headers and _meta those require.
-// catalog(tool) answers the tools/list requests that find a tool's header
-// arguments.
+// WithLegacyClients lets clients of the 2025 Streamable HTTP protocol versions
+// use next, a handler for the current version, without sessions. They can
+// initialize and use next's tools, resources, prompts and completions; next
+// receives each of their requests as a current request with the same
+// credentials. catalog(tool) must answer tools/list with the named tool's
+// definition. Current requests reach next unchanged.
 //
-// Authentication must wrap this handler. Each translated request retains its
-// own context and credentials; no session IDs are issued. A legacy request body
-// may hold at most maxMessageBytes; current requests reach next unread.
-// Responses, including streams and HTTP authorization failures, pass through
-// unchanged.
+// Authentication must wrap this handler. A 2025 request body larger than
+// maxMessageBytes is rejected. Responses from next, including streams and
+// HTTP errors, reach the client unchanged.
 //
-// Legacy clients cannot receive server-initiated requests or subscriptions. The
-// server sees the bridge as a client without capabilities: what a legacy client
-// declares at initialize does not reach it, and a server that needs a client
-// capability answers with an error instead of an input request.
+// 2025 clients cannot receive server-initiated requests or subscriptions, and
+// next does not see the capabilities they declare.
 func WithLegacyClients(next http.Handler, catalog func(tool string) http.Handler, maxMessageBytes int64) http.Handler {
 	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
 	origins := http.NewCrossOriginProtection()
@@ -173,6 +169,9 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 	if media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type")); media != "text/event-stream" {
 		return decodeResponse(body)
 	}
+	// An [event's data] is its data fields joined by newlines.
+	//
+	// [event's data]: https://html.spec.whatwg.org/multipage/server-sent-events.html#dispatchMessage
 	var data []byte
 	for line := range bytes.Lines(body) {
 		if line = bytes.TrimRight(line, "\r\n"); len(line) == 0 {
