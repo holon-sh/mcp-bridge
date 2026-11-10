@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,7 +82,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(version)})
-	result, err := b.request(probeCtx, "server/discover", params)
+	result, err := b.request(probeCtx, "server/discover", params, nil)
 	if errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) || errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams}) {
 		// Servers that predate MCP 2026-07-28 reject server/discover: the TypeScript and
 		// Go SDKs as an unknown method, the Python SDK as invalid params. After a legacy
@@ -111,7 +113,7 @@ func (b *currentBridge) initialize(ctx context.Context) error {
 		ClientInfo:      clientInfo,
 		Capabilities:    &mcp.ClientCapabilities{},
 	})
-	result, err := b.request(ctx, "initialize", params)
+	result, err := b.request(ctx, "initialize", params, nil)
 	if err != nil {
 		return fmt.Errorf("initialize legacy MCP server: %w", err)
 	}
@@ -163,13 +165,35 @@ func (b *currentBridge) write(ctx context.Context, msg jsonrpc.Message) error {
 	return err
 }
 
-func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request) (*call, error) {
+// traceContextKeys are the W3C trace context headers, which a stdio process can
+// only read from params._meta (SEP-414).
+var traceContextKeys = []string{"traceparent", "tracestate", "baggage"}
+
+// begin forwards a call to the process. header is the HTTP request the call
+// serves, or nil for the bridge's own requests.
+func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request, header http.Header) (*call, error) {
 	var params, meta map[string]json.RawMessage
 	_ = json.Unmarshal(req.Params, &params)
 	_ = json.Unmarshal(params["_meta"], &meta)
 	c := &call{id: rand.Text(), original: req.ID, progress: meta["progressToken"], messages: make(chan delivery, 8)}
 	if c.progress != nil {
 		meta["progressToken"], _ = json.Marshal(c.id)
+		params["_meta"], _ = json.Marshal(meta)
+	}
+	// A request that carries trace context in its headers replaces any in _meta.
+	if header.Get("Traceparent") != "" {
+		if meta == nil {
+			meta = map[string]json.RawMessage{}
+		}
+		for _, key := range traceContextKeys {
+			delete(meta, key)
+			if values := header.Values(key); len(values) > 0 {
+				meta[key], _ = json.Marshal(strings.Join(values, ","))
+			}
+		}
+		if params == nil {
+			params = map[string]json.RawMessage{}
+		}
 		params["_meta"], _ = json.Marshal(meta)
 	}
 	raw, _ := json.Marshal(params)
@@ -225,9 +249,9 @@ func (b *currentBridge) receive(ctx context.Context, c *call) (jsonrpc.Message, 
 	}
 }
 
-func (b *currentBridge) request(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+func (b *currentBridge) request(ctx context.Context, method string, params json.RawMessage, header http.Header) (json.RawMessage, error) {
 	id, _ := jsonrpc.MakeID("internal")
-	c, err := b.begin(ctx, &jsonrpc.Request{ID: id, Method: method, Params: params})
+	c, err := b.begin(ctx, &jsonrpc.Request{ID: id, Method: method, Params: params}, header)
 	if err != nil {
 		return nil, err
 	}
