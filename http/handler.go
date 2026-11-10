@@ -70,7 +70,10 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		return
 	}
 	if req.Method == "tools/call" {
-		arguments, err := proxy.ToolHeaderArguments(r.Context(), req.Params, b.request)
+		lookup := func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+			return b.request(ctx, method, params, r.Header)
+		}
+		arguments, err := proxy.ToolHeaderArguments(r.Context(), req.Params, lookup)
 		if err = errors.Join(err, proxy.ValidateArgumentHeaders(r.Header, arguments)); err != nil {
 			writeHeaderError(w, req.ID, err)
 			return
