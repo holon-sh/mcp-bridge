@@ -20,82 +20,25 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// WithLegacyTools adds sessionless 2025 Streamable HTTP clients to a current
-// tools-only handler. Authentication must wrap this handler. Each translated
-// request retains its own context and credentials; no session IDs are issued.
-// The current handler must return JSON for tools/list. Tool responses, including
-// streams and HTTP authorization failures, pass through unchanged.
-// Legacy clients cannot receive server-initiated requests or subscriptions.
-func WithLegacyTools(next http.Handler, catalog func(tool string) http.Handler, info *mcp.Implementation) http.Handler {
-	server := mcp.NewServer(info, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions, Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}})
-	lifecycle := legacyLifecycle(server)
-	return withLegacy(next, proxy.MaxMessageBytes, func(w http.ResponseWriter, r *http.Request, request *jsonrpc.Request) {
-		switch request.Method {
-		case "", "initialize", "ping":
-			lifecycle.ServeHTTP(w, r)
-		case "tools/list", "tools/call":
-			forwardLegacy(w, r, next, catalog, request)
-		default:
-			WriteError(w, 404, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not supported by the sessionless tools bridge"})
-		}
-	})
-}
-
-// WithLegacyClients adds sessionless 2025 Streamable HTTP clients to a current
-// handler for one MCP server. It answers initialize from the server's
-// server/discover result and forwards the tools, resources, prompts and
-// completion methods as current requests, with the request metadata headers
-// and _meta those require. next answers those requests, including the
-// server/discover and tools/list requests the bridge sends to answer
-// initialize and to find a tool's header arguments.
+// WithLegacyClients adds sessionless 2025 Streamable HTTP clients to next, a
+// current handler. It answers initialize from next's server/discover result and
+// forwards the tools, resources, prompts and completion methods as current
+// requests, with the request metadata headers and _meta those require.
+// catalog(tool) answers the tools/list requests that find a tool's header
+// arguments.
 //
 // Authentication must wrap this handler. Each translated request retains its
-// own context and credentials; no session IDs are issued. A legacy request
-// body may hold at most maxMessageBytes; current requests reach next unread.
+// own context and credentials; no session IDs are issued. A legacy request body
+// may hold at most maxMessageBytes; current requests reach next unread.
 // Responses, including streams and HTTP authorization failures, pass through
-// unchanged, except that an input-required result becomes an error.
+// unchanged.
 //
-// Legacy clients cannot receive server-initiated requests or subscriptions.
-// The server sees the bridge, not the legacy client, as its client: the
-// capabilities a legacy client declares at initialize do not reach it.
-func WithLegacyClients(next http.Handler, maxMessageBytes int64) http.Handler {
+// Legacy clients cannot receive server-initiated requests or subscriptions. The
+// server sees the bridge as a client without capabilities: what a legacy client
+// declares at initialize does not reach it, and a server that needs a client
+// capability answers with an error instead of an input request.
+func WithLegacyClients(next http.Handler, catalog func(tool string) http.Handler, maxMessageBytes int64) http.Handler {
 	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
-	catalog := func(string) http.Handler { return next }
-	return withLegacy(next, maxMessageBytes, func(w http.ResponseWriter, r *http.Request, request *jsonrpc.Request) {
-		switch request.Method {
-		case "", "ping":
-			lifecycle.ServeHTTP(w, r)
-		case "initialize":
-			initializeLegacy(w, r, next, request)
-		case "tools/list", "resources/list", "resources/templates/list", "prompts/list", "completion/complete":
-			forwardLegacy(w, r, next, catalog, request)
-		case "tools/call", "resources/read", "prompts/get":
-			// [Multi round-trip requests] may answer these with input requests,
-			// which a legacy client has no way to answer.
-			//
-			// [Multi round-trip requests]: https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr#supported-requests
-			results := &legacyResults{ResponseWriter: w}
-			forwardLegacy(results, r, next, catalog, request)
-			results.finish()
-		default:
-			WriteError(w, 404, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not supported by the sessionless bridge"})
-		}
-	})
-}
-
-var legacyHTTPVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
-
-func LegacyToolsVersions() []string {
-	return slices.Clone(legacyHTTPVersions)
-}
-
-func legacyLifecycle(server *mcp.Server) http.Handler {
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-}
-
-// withLegacy sends legacy requests to serve, with the method of a call or an
-// empty method for anything else, and current requests to next.
-func withLegacy(next http.Handler, maxMessageBytes int64, serve func(http.ResponseWriter, *http.Request, *jsonrpc.Request)) http.Handler {
 	origins := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A request without a [protocol version header] uses 2025-03-26.
@@ -109,44 +52,53 @@ func withLegacy(next http.Handler, maxMessageBytes int64, serve func(http.Respon
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		call := &jsonrpc.Request{}
+		request := &jsonrpc.Request{}
 		if r.Method == http.MethodPost {
 			msg := ReadMessage(w, r, maxMessageBytes)
 			if msg == nil {
 				return
 			}
-			if request, _ := msg.(*jsonrpc.Request); request != nil && request.IsCall() {
-				call = request
+			if call, _ := msg.(*jsonrpc.Request); call != nil && call.IsCall() {
+				request = call
 			}
 		}
-		serve(w, r, call)
+		switch request.Method {
+		case "", "ping":
+			lifecycle.ServeHTTP(w, r)
+		case "initialize":
+			initializeLegacy(w, r, next, request)
+		case "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read", "prompts/list", "prompts/get", "completion/complete":
+			forwardLegacy(w, r, next, catalog, request)
+		default:
+			WriteError(w, 404, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not supported by the sessionless bridge"})
+		}
 	})
+}
+
+var legacyHTTPVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
+
+func legacyLifecycle(server *mcp.Server) http.Handler {
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 }
 
 // initializeLegacy answers initialize with what server/discover reports.
 func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(proxy.CurrentVersion)})
-	query := currentRequest(r, &jsonrpc.Request{ID: request.ID, Method: "server/discover", Params: params})
-	query.Header.Set("Mcp-Method", "server/discover")
-	response := httptest.NewRecorder()
-	next.ServeHTTP(response, query)
-	reply := recordedReply(response)
-	if reply == nil || reply.Error != nil {
-		relay(w, response)
+	result, err := query(w, r, next, request.ID, "server/discover", params)
+	if err != nil {
 		return
 	}
-	var discovered mcp.DiscoverResult
-	if json.Unmarshal(reply.Result, &discovered) != nil {
-		WriteError(w, 502, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid discovery response"})
+	var discovered struct {
+		mcp.DiscoverResult
+		Meta struct {
+			ServerInfo *mcp.Implementation `json:"io.modelcontextprotocol/serverInfo"`
+		} `json:"_meta"`
+	}
+	if json.Unmarshal(result, &discovered) != nil {
+		WriteError(w, 502, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid server/discover result"})
 		return
 	}
-	info := &mcp.Implementation{}
-	raw, _ := json.Marshal(discovered.Meta[mcp.MetaKeyServerInfo])
-	_ = json.Unmarshal(raw, info)
-	if info.Name == "" {
-		info = clientInfo
-	}
-	legacyLifecycle(mcp.NewServer(info, &mcp.ServerOptions{
+	legacyLifecycle(mcp.NewServer(cmp.Or(discovered.Meta.ServerInfo, clientInfo), &mcp.ServerOptions{
 		SupportedProtocolVersions: legacyHTTPVersions,
 		Capabilities:              translate.Capabilities(discovered.Capabilities),
 		Instructions:              discovered.Instructions,
@@ -167,23 +119,12 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, ca
 	request.Params, _ = json.Marshal(params)
 	var tool string
 	_ = json.Unmarshal(params["name"], &tool)
-	r = currentRequest(r, request)
-	var rejected *httptest.ResponseRecorder
+	r = currentRequest(r.Context(), r, request)
 	err := proxy.SetHeaders(r.Context(), r.Header, request, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
-		query := r.Clone(ctx)
-		query.Header.Set("Mcp-Method", method)
-		setBody(query, &jsonrpc.Request{ID: request.ID, Method: method, Params: params})
-		response := httptest.NewRecorder()
-		catalog(tool).ServeHTTP(response, query)
-		if reply := recordedReply(response); reply != nil && reply.Error == nil {
-			return reply.Result, nil
-		}
-		rejected = response
-		return nil, errors.New("tool catalog rejected the request")
+		return query(w, r.WithContext(ctx), catalog(tool), request.ID, method, params)
 	})
 	switch {
-	case rejected != nil:
-		relay(w, rejected)
+	case errors.Is(err, errAnswered):
 	case err != nil:
 		writeHeaderError(w, request.ID, err)
 	default:
@@ -191,46 +132,37 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, ca
 	}
 }
 
+var errAnswered = errors.New("answered by the current handler")
+
+// query sends handler a current request for method with r's credentials and
+// returns its result. Otherwise it relays handler's answer to w, or reports an
+// unreadable one, and returns errAnswered.
+func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id jsonrpc.ID, method string, params json.RawMessage) (json.RawMessage, error) {
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, currentRequest(r.Context(), r, &jsonrpc.Request{ID: id, Method: method, Params: params}))
+	reply := recordedReply(response)
+	switch {
+	case reply != nil && reply.Error == nil:
+		return reply.Result, nil
+	case reply == nil && response.Code == http.StatusOK:
+		WriteError(w, 502, id, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid " + method + " reply"})
+	default:
+		maps.Copy(w.Header(), response.Header())
+		w.WriteHeader(response.Code)
+		_, _ = response.Body.WriteTo(w)
+	}
+	return nil, errAnswered
+}
+
 // currentRequest returns a copy of r that carries request with the current
 // protocol version and no other MCP headers.
-func currentRequest(r *http.Request, request *jsonrpc.Request) *http.Request {
-	r = r.Clone(r.Context())
+func currentRequest(ctx context.Context, r *http.Request, request *jsonrpc.Request) *http.Request {
+	r = r.Clone(ctx)
 	maps.DeleteFunc(r.Header, func(key string, _ []string) bool { return strings.HasPrefix(strings.ToLower(key), "mcp-") })
 	r.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
+	r.Header.Set("Mcp-Method", request.Method)
 	setBody(r, request)
 	return r
-}
-
-// recordedReply returns the JSON-RPC response in a successful reply, which is
-// JSON or an event stream, or nil if there is none.
-func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
-	if response.Code != http.StatusOK {
-		return nil
-	}
-	media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type"))
-	if media != "text/event-stream" {
-		return decodeResponse(response.Body.Bytes())
-	}
-	for line := range bytes.Lines(response.Body.Bytes()) {
-		if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			if reply := decodeResponse(data); reply != nil {
-				return reply
-			}
-		}
-	}
-	return nil
-}
-
-func decodeResponse(data []byte) *jsonrpc.Response {
-	message, _ := jsonrpc.DecodeMessage(bytes.TrimSpace(data))
-	reply, _ := message.(*jsonrpc.Response)
-	return reply
-}
-
-func relay(w http.ResponseWriter, response *httptest.ResponseRecorder) {
-	maps.Copy(w.Header(), response.Header())
-	w.WriteHeader(response.Code)
-	_, _ = response.Body.WriteTo(w)
 }
 
 func setBody(r *http.Request, request *jsonrpc.Request) {
@@ -239,98 +171,35 @@ func setBody(r *http.Request, request *jsonrpc.Request) {
 	r.ContentLength = int64(len(body))
 }
 
-// legacyResults replaces an input-required result in a JSON response or in a
-// line of an event stream with an error. It holds at most inspectBytes of a
-// message: a larger one passes through, since an input-required result carries
-// only its input requests.
-type legacyResults struct {
-	http.ResponseWriter
-	started, inspect, stream, overflow bool
-	pending                            []byte
-}
-
-const inspectBytes = 64 << 10
-
-func (w *legacyResults) WriteHeader(status int) {
-	if w.started {
-		return
-	}
-	w.started = true
-	media, _, _ := mime.ParseMediaType(w.Header().Get("Content-Type"))
-	w.stream = media == "text/event-stream"
-	w.inspect = status == http.StatusOK && (w.stream || media == "application/json")
-	if w.inspect && !w.stream {
-		w.Header().Del("Content-Length")
-	}
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *legacyResults) Write(p []byte) (int, error) {
-	w.WriteHeader(http.StatusOK)
-	if !w.inspect {
-		return w.ResponseWriter.Write(p)
-	}
-	written := len(p)
-	for len(p) > 0 {
-		end := len(p)
-		if i := bytes.IndexByte(p, '\n'); w.stream && i >= 0 {
-			end = i + 1
-		}
-		chunk, complete := p[:end], w.stream && p[end-1] == '\n'
-		p = p[end:]
-		var err error
-		switch {
-		case w.overflow:
-			_, err = w.ResponseWriter.Write(chunk)
-			w.overflow = !complete
-		case complete:
-			w.pending = append(w.pending, chunk...)
-			err = w.finish()
-		default:
-			w.pending = append(w.pending, chunk...)
-			if len(w.pending) > inspectBytes {
-				_, err = w.ResponseWriter.Write(w.pending)
-				w.pending, w.overflow = nil, true
-			}
-		}
-		if err != nil {
-			return 0, err
-		}
-	}
-	return written, nil
-}
-
-// finish writes the message held so far.
-func (w *legacyResults) finish() error {
-	if len(w.pending) == 0 {
+// recordedReply returns the JSON-RPC response in a successful reply, sent as
+// JSON or as an event stream, or nil if there is none.
+func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
+	if response.Code != http.StatusOK {
 		return nil
 	}
-	data := w.pending
-	w.pending = nil
-	payload, prefixed := bytes.CutPrefix(data, []byte("data:"))
-	if w.stream && !prefixed {
-		_, err := w.ResponseWriter.Write(data)
-		return err
+	body := response.Body.Bytes()
+	if media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type")); media != "text/event-stream" {
+		return decodeResponse(body)
 	}
-	reply := decodeResponse(payload)
-	var result struct {
-		ResultType string `json:"resultType"`
-	}
-	if reply != nil && reply.Error == nil && json.Unmarshal(reply.Result, &result) == nil && result.ResultType == "input_required" {
-		data, _ = jsonrpc.EncodeMessage(&jsonrpc.Response{ID: reply.ID, Error: &jsonrpc.Error{
-			Code: jsonrpc.CodeInternalError, Message: "MCP translation does not support input-required results",
-		}})
-		if w.stream {
-			data = append(append([]byte("data: "), data...), '\n')
+	// An [event's data] is its data fields joined by newlines.
+	//
+	// [event's data]: https://html.spec.whatwg.org/multipage/server-sent-events.html#dispatchMessage
+	var data []byte
+	for line := range bytes.Lines(body) {
+		if line = bytes.TrimRight(line, "\r\n"); len(line) == 0 {
+			if reply := decodeResponse(data); reply != nil {
+				return reply
+			}
+			data = nil
+		} else if value, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			data = append(append(data, bytes.TrimPrefix(value, []byte(" "))...), '\n')
 		}
 	}
-	_, err := w.ResponseWriter.Write(data)
-	return err
+	return decodeResponse(data)
 }
 
-func (w *legacyResults) Flush() {
-	w.WriteHeader(http.StatusOK)
-	_ = http.NewResponseController(w.ResponseWriter).Flush()
+func decodeResponse(data []byte) *jsonrpc.Response {
+	message, _ := jsonrpc.DecodeMessage(bytes.TrimSpace(data))
+	reply, _ := message.(*jsonrpc.Response)
+	return reply
 }
-
-func (w *legacyResults) Unwrap() http.ResponseWriter { return w.ResponseWriter }
