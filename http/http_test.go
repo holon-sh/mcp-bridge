@@ -238,6 +238,51 @@ func TestConcurrentIDsAndProgress(t *testing.T) {
 	group.Wait()
 }
 
+func TestTraceContextReachesProcess(t *testing.T) {
+	_, server := start(t)
+	client := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+	parent := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	for name, test := range map[string]struct {
+		header http.Header
+		want   map[string]any
+	}{
+		"header": {http.Header{"Traceparent": {parent}, "Baggage": {"a=1", "b=2"}}, map[string]any{"traceparent": parent, "baggage": "a=1,b=2"}},
+		"meta":   {nil, map[string]any{"traceparent": client, "tracestate": "client=1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := testutil.Request(t, "tools/call", map[string]any{"name": "echo", "_meta": map[string]any{"traceparent": client, "tracestate": "client=1"}})
+			req.URL.Host = strings.TrimPrefix(server.URL, "http://")
+			for key, values := range test.header {
+				req.Header[key] = values
+			}
+			res, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer res.Body.Close()
+			var response struct {
+				Result struct {
+					Echo struct {
+						Meta map[string]any `json:"_meta"`
+					}
+				}
+			}
+			if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]any{}
+			for _, key := range traceContextKeys {
+				if value, ok := response.Result.Echo.Meta[key]; ok {
+					got[key] = value
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) || response.Result.Echo.Meta["io.modelcontextprotocol/protocolVersion"] != ProtocolVersion {
+				t.Fatal(response.Result.Echo.Meta)
+			}
+		})
+	}
+}
+
 func TestPayloadForwarding(t *testing.T) {
 	for _, direction := range []string{"serve", "connect"} {
 		t.Run(direction, func(t *testing.T) {

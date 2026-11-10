@@ -35,6 +35,10 @@ flowchart LR
 mcp-bridge serve --listen 127.0.0.1:8080 -- /path/to/mcp-server --stdio
 ```
 
+A stdio server cannot read HTTP headers, so a request's `traceparent`,
+`tracestate` and `baggage` headers reach it in `params._meta`, replacing any
+trace context the client put there. Legacy sessions do not carry them.
+
 <details open>
 <summary><code>mcp-bridge serve --help</code></summary>
 

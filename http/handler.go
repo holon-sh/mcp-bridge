@@ -76,7 +76,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 			return
 		}
 	}
-	c, err := b.begin(r.Context(), req)
+	c, err := b.begin(r.Context(), req, r.Header)
 	if err != nil {
 		WriteError(w, 503, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: err.Error()})
 		return

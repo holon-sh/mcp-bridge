@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -163,13 +165,35 @@ func (b *currentBridge) write(ctx context.Context, msg jsonrpc.Message) error {
 	return err
 }
 
-func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request) (*call, error) {
+// traceContextKeys are the W3C trace context headers, which a stdio process can
+// only read from params._meta (SEP-414).
+var traceContextKeys = []string{"traceparent", "tracestate", "baggage"}
+
+// begin forwards a call to the process. header is the HTTP request's, or nil
+// for the bridge's own requests.
+func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request, header http.Header) (*call, error) {
 	var params, meta map[string]json.RawMessage
 	_ = json.Unmarshal(req.Params, &params)
 	_ = json.Unmarshal(params["_meta"], &meta)
 	c := &call{id: rand.Text(), original: req.ID, progress: meta["progressToken"], messages: make(chan delivery, 8)}
 	if c.progress != nil {
 		meta["progressToken"], _ = json.Marshal(c.id)
+		params["_meta"], _ = json.Marshal(meta)
+	}
+	// A request that carries trace context in its headers replaces any in _meta.
+	if header.Get("Traceparent") != "" {
+		if meta == nil {
+			meta = map[string]json.RawMessage{}
+		}
+		for _, key := range traceContextKeys {
+			delete(meta, key)
+			if values := header.Values(key); len(values) > 0 {
+				meta[key], _ = json.Marshal(strings.Join(values, ","))
+			}
+		}
+		if params == nil {
+			params = map[string]json.RawMessage{}
+		}
 		params["_meta"], _ = json.Marshal(meta)
 	}
 	raw, _ := json.Marshal(params)
@@ -227,7 +251,7 @@ func (b *currentBridge) receive(ctx context.Context, c *call) (jsonrpc.Message, 
 
 func (b *currentBridge) request(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 	id, _ := jsonrpc.MakeID("internal")
-	c, err := b.begin(ctx, &jsonrpc.Request{ID: id, Method: method, Params: params})
+	c, err := b.begin(ctx, &jsonrpc.Request{ID: id, Method: method, Params: params}, nil)
 	if err != nil {
 		return nil, err
 	}
