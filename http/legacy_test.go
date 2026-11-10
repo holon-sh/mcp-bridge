@@ -1,6 +1,7 @@
 package mcphttp_test
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -80,6 +81,51 @@ func TestLegacyClients(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLegacyClientsEvents(t *testing.T) {
+	cancelled := make(chan struct{})
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch r.Header.Get("Mcp-Method") {
+		case "server/discover":
+			io.WriteString(w, `data: {"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"events":{"listChanged":true},"extensions":{"io.modelcontextprotocol/events":{"listChanged":true}}}}}`+"\n\n")
+		case "events/stream":
+			io.WriteString(w, `data: {"jsonrpc":"2.0","method":"notifications/events/active","params":{"cursor":null}}`+"\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(cancelled)
+		}
+	})
+	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, func(string) http.Handler { return upstream }, proxy.MaxMessageBytes))
+	defer bridge.Close()
+	post := func(ctx context.Context, body string) *http.Response {
+		r, _ := http.NewRequestWithContext(ctx, "POST", bridge.URL, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Accept", "application/json, text/event-stream")
+		r.Header.Set("Mcp-Protocol-Version", "2025-11-25")
+		response, err := bridge.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	var initialized struct {
+		Result struct {
+			Capabilities map[string]any `json:"capabilities"`
+		} `json:"result"`
+	}
+	json.NewDecoder(post(t.Context(), `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`).Body).Decode(&initialized)
+	if want := map[string]any{"events": map[string]any{}, "extensions": map[string]any{"io.modelcontextprotocol/events": map[string]any{}}}; !reflect.DeepEqual(initialized.Result.Capabilities, want) {
+		t.Fatalf("capabilities = %v", initialized.Result.Capabilities)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	stream := post(ctx, `{"jsonrpc":"2.0","id":2,"method":"events/stream","params":{"name":"board.changed","arguments":{},"cursor":null}}`)
+	if line, err := bufio.NewReader(stream.Body).ReadString('\n'); !strings.Contains(line, "notifications/events/active") {
+		t.Fatalf("first frame = %q, %v", line, err)
+	}
+	cancel()
+	<-cancelled
 }
 
 func TestLegacyClientsBoundaries(t *testing.T) {
