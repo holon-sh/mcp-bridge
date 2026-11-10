@@ -32,6 +32,8 @@ func TestValidateHeaders(t *testing.T) {
 		{name: "encoded name", method: "tools/call", params: `{"name":"发布",` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"=?base64?5Y+R5biD?="}}},
 		{name: "list"},
 		{name: "missing version header", headers: http.Header{"Mcp-Protocol-Version": nil}, fault: "header"},
+		{name: "duplicate version header", headers: http.Header{"Mcp-Protocol-Version": {"2026-07-28", "2099-01-01"}}, fault: "header"},
+		{name: "unsupported version header", headers: http.Header{"Mcp-Protocol-Version": {"2099-01-01"}}, fault: "header"},
 		{name: "metadata version", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`, fault: "body"},
 		{name: "client name", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`, fault: "body"},
 		{name: "malformed client info", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1","icons":1}`, capabilities) + `}`, fault: "body"},

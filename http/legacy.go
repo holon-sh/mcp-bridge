@@ -31,8 +31,7 @@ import (
 // HTTP errors, reach the client unchanged.
 //
 // 2025 clients cannot receive server-initiated requests or subscriptions, and
-// next does not see the capabilities they declare. They see next's MCP Events
-// capability and can poll and stream its events.
+// next does not see the capabilities they declare.
 func WithLegacyClients(next http.Handler, catalog func(tool string) http.Handler, maxMessageBytes int64) http.Handler {
 	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
 	origins := http.NewCrossOriginProtection()
