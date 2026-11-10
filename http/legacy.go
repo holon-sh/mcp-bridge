@@ -86,16 +86,37 @@ func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler,
 			ServerInfo *mcp.Implementation `json:"io.modelcontextprotocol/serverInfo"`
 		} `json:"_meta"`
 	}
-	if json.Unmarshal(result, &discovered) != nil {
+	var upstream struct {
+		Capabilities map[string]json.RawMessage `json:"capabilities"`
+	}
+	if json.Unmarshal(result, &discovered) != nil || json.Unmarshal(result, &upstream) != nil {
 		WriteError(w, 502, request.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid server/discover result"})
 		return
 	}
+	capabilities := translate.Capabilities(discovered.Capabilities)
+	if discovered.Capabilities != nil && discovered.Capabilities.Extensions[eventsExtension] != nil {
+		capabilities.AddExtension(eventsExtension, nil)
+	}
+	response := httptest.NewRecorder()
 	legacyLifecycle(mcp.NewServer(cmp.Or(discovered.Meta.ServerInfo, clientInfo), &mcp.ServerOptions{
 		SupportedProtocolVersions: legacyHTTPVersions,
-		Capabilities:              translate.Capabilities(discovered.Capabilities),
+		Capabilities:              capabilities,
 		Instructions:              discovered.Instructions,
-	})).ServeHTTP(w, r)
+	})).ServeHTTP(response, r)
+	if reply := recordedReply(response); reply != nil && reply.Error == nil && upstream.Capabilities["events"] != nil {
+		var fields, served map[string]json.RawMessage
+		_ = json.Unmarshal(reply.Result, &fields)
+		_ = json.Unmarshal(fields["capabilities"], &served)
+		served["events"] = json.RawMessage(`{}`)
+		fields["capabilities"], _ = json.Marshal(served)
+		reply.Result, _ = json.Marshal(fields)
+		data, _ := jsonrpc.EncodeMessage(reply)
+		response.Body = bytes.NewBuffer(data)
+	}
+	copyResponse(w, response)
 }
+
+const eventsExtension = "io.modelcontextprotocol/events"
 
 func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, catalog func(string) http.Handler, request *jsonrpc.Request) {
 	params := map[string]json.RawMessage{}
@@ -136,11 +157,15 @@ func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id json
 	case reply == nil && response.Code == http.StatusOK:
 		WriteError(w, 502, id, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid " + method + " reply"})
 	default:
-		maps.Copy(w.Header(), response.Header())
-		w.WriteHeader(response.Code)
-		_, _ = response.Body.WriteTo(w)
+		copyResponse(w, response)
 	}
 	return nil, errAnswered
+}
+
+func copyResponse(w http.ResponseWriter, response *httptest.ResponseRecorder) {
+	maps.Copy(w.Header(), response.Header())
+	w.WriteHeader(response.Code)
+	_, _ = response.Body.WriteTo(w)
 }
 
 func currentRequest(ctx context.Context, r *http.Request, request *jsonrpc.Request) *http.Request {

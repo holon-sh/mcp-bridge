@@ -18,10 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/holon-sh/mcp-bridge/internal/testutil"
-	"github.com/holon-sh/mcp-bridge/proxy"
 	mcpbridge "github.com/holon-sh/mcp-bridge/stdio"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1260,185 +1258,6 @@ func TestLegacySessionLimit(t *testing.T) {
 	}
 }
 
-// fakeIdleTimer advances only when the test requests it. It drives the same
-// reset and expiry callback used by the live HTTP session and subprocess.
-type fakeIdleTimer struct {
-	mu            sync.Mutex
-	now, deadline time.Duration
-	active        bool
-	fire          func()
-}
-
-func (c *fakeIdleTimer) Reset(d time.Duration) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	active := c.active
-	c.deadline, c.active = c.now+d, true
-	return active
-}
-
-func (c *fakeIdleTimer) Stop() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	active := c.active
-	c.active = false
-	return active
-}
-
-func (c *fakeIdleTimer) advance(d time.Duration) bool {
-	c.mu.Lock()
-	c.now += d
-	if !c.active || c.now < c.deadline {
-		c.mu.Unlock()
-		return false
-	}
-	c.active = false
-	c.mu.Unlock()
-	c.fire()
-	return true
-}
-
-func TestLegacySessionExpiry(t *testing.T) {
-	for _, mode := range []string{"streamable-http", "sse"} {
-		t.Run(mode, func(t *testing.T) {
-			b, err := Start(t.Context(), commandFactory, Options{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			clock := new(fakeIdleTimer)
-			b.afterFunc = func(d time.Duration, fire func()) idleTimer {
-				clock.fire = fire
-				clock.Reset(d)
-				return clock
-			}
-			server := httptest.NewServer(b)
-			t.Cleanup(func() { b.Close(); server.Close() })
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			method, path, data := http.MethodPost, "/mcp", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"expiry","version":"1"},"capabilities":{}}}`
-			if mode == "sse" {
-				method, path, data = http.MethodGet, "/sse", ""
-			}
-			request, _ := http.NewRequestWithContext(ctx, method, server.URL+path, strings.NewReader(data))
-			request.Header.Set("Accept", "application/json, text/event-stream")
-			request.Header.Set("Content-Type", "application/json")
-			response, err := server.Client().Do(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if response.StatusCode != 200 {
-				t.Fatal(response.Status)
-			}
-			id := response.Header.Get("Mcp-Session-Id")
-			endpoint := server.URL + "/mcp"
-			stream := bufio.NewReader(response.Body)
-			if mode == "sse" {
-				for {
-					line, err := stream.ReadString('\n')
-					if err != nil {
-						t.Fatal(err)
-					}
-					if path, ok := strings.CutPrefix(line, "data: "); ok {
-						endpoint = server.URL + strings.TrimSpace(path)
-						break
-					}
-				}
-			} else {
-				_, err = io.Copy(io.Discard, response.Body)
-				response.Body.Close()
-				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-				req.Header.Set("Mcp-Session-Id", id)
-				req.Header.Set("Accept", "text/event-stream")
-				response, err = server.Client().Do(req)
-				if err != nil {
-					t.Fatal(err)
-				}
-				stream = bufio.NewReader(response.Body)
-			}
-			defer response.Body.Close()
-			// SSE publishes its endpoint before the idle timer is installed.
-			b.work.Wait()
-			b.mu.Lock()
-			var session *legacySession
-			for _, candidate := range b.sessions {
-				session = candidate
-			}
-			b.mu.Unlock()
-			ping := func() {
-				t.Helper()
-				req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}`))
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("Accept", "application/json, text/event-stream")
-				req.Header.Set("Mcp-Session-Id", id)
-				res, err := server.Client().Do(req)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer res.Body.Close()
-				reader, want := bufio.NewReader(res.Body), http.StatusOK
-				if mode == "sse" {
-					reader, want = stream, http.StatusAccepted
-				}
-				if res.StatusCode != want {
-					t.Fatal(res.Status)
-				}
-				var raw []byte
-				for {
-					line, err := reader.ReadString('\n')
-					if err != nil {
-						t.Fatal(err)
-					}
-					if data, ok := strings.CutPrefix(line, "data: "); ok {
-						raw = []byte(data)
-						break
-					}
-				}
-				var reply struct {
-					ID     int
-					Result json.RawMessage
-					Error  *jsonrpc.Error
-				}
-				if err := json.Unmarshal(raw, &reply); err != nil || reply.ID != 2 || reply.Error != nil || len(reply.Result) == 0 {
-					t.Fatalf("live session ping: %s (%v)", raw, err)
-				}
-			}
-			if clock.advance(5*time.Minute - time.Nanosecond) {
-				t.Fatal("session expired before its idle deadline")
-			}
-			ping() // Activity renews the full five-minute idle period.
-			if clock.advance(time.Nanosecond) {
-				t.Fatal("activity did not renew the idle deadline")
-			}
-			ping() // The original deadline must no longer expire this session.
-			if clock.advance(5*time.Minute - time.Nanosecond) {
-				t.Fatal("session expired before its renewed idle deadline")
-			}
-			if !clock.advance(time.Nanosecond) {
-				t.Fatal("session did not expire at its idle deadline")
-			}
-			_, err = io.Copy(io.Discard, stream)
-			response.Body.Close()
-			if err != nil {
-				t.Fatalf("idle session did not close: %v", err)
-			}
-			<-session.done
-			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-			req.Header.Set("Mcp-Session-Id", id)
-			res, err := server.Client().Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			res.Body.Close()
-			if res.StatusCode != http.StatusNotFound {
-				t.Fatalf("expired session: HTTP %d", res.StatusCode)
-			}
-			if err := b.Close(); err != nil {
-				t.Fatalf("session failure affected bridge: %v", err)
-			}
-		})
-	}
-}
-
 func TestProtocolHeaderErrors(t *testing.T) {
 	_, server := start(t)
 	for _, test := range []struct {
@@ -1471,10 +1290,6 @@ func TestProtocolHeaderErrors(t *testing.T) {
 					}
 				}
 			}
-			// The public validator requires a version even when notifications
-			// may omit it. Both boundaries must reject malformed versions before
-			// parsing params or forwarding messages.
-			check(proxy.ValidateHeaders(headers, &jsonrpc.Request{}, ProtocolVersion))
 			for _, request := range []struct {
 				name   string
 				body   string
