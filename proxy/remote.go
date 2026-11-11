@@ -20,10 +20,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// NewRemoteTransport wraps base so current requests can use legacy Streamable
-// HTTP servers. A legacy server's result gets the fields of a current result,
-// and a tools/list, tools/call or server/discover request the server refuses is
-// retried in a legacy session.
+// NewRemoteTransport wraps base so current requests, which callers have checked
+// with [ValidateHeaders], can use legacy Streamable HTTP servers. A legacy
+// server's result gets the fields of a current result, and a tools/list,
+// tools/call or server/discover request the server refuses is retried in a
+// legacy session.
 func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 	return legacyFallback{base: cmp.Or(base, http.DefaultTransport)}
 }
@@ -31,10 +32,7 @@ func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 type legacyFallback struct{ base http.RoundTripper }
 
 func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.Body == nil || r.Header.Get("Mcp-Protocol-Version") != CurrentVersion {
-		return t.base.RoundTrip(r)
-	}
-	sent, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, mcp.DefaultMaxLineLength))
+	sent, err := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	if err != nil {
 		return nil, err
@@ -70,7 +68,7 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	if errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) && slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, method) ||
 		method == "server/discover" && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) {
 		message, _ = jsonrpc.DecodeMessage(sent)
-		if request, ok := message.(*jsonrpc.Request); ok && ValidateHeaders(r.Header, request, CurrentVersion) == nil {
+		if request, ok := message.(*jsonrpc.Request); ok {
 			_ = originalBody.Close()
 			return t.legacy(r, request)
 		}
@@ -135,9 +133,6 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 	}
 	defer session.Close()
 	initialized := session.InitializeResult()
-	if initialized.ProtocolVersion >= CurrentVersion {
-		return nil, errors.New("upstream did not negotiate a legacy MCP protocol")
-	}
 	var result any
 	switch request.Method {
 	case "server/discover":

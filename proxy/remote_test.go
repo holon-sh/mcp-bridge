@@ -235,12 +235,11 @@ func TestLegacyCompatibility(t *testing.T) {
 
 func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		method  string
-		status  int
-		body    string
-		want    string
-		headers http.Header
+		name   string
+		method string
+		status int
+		body   string
+		want   string
 	}{
 		{name: "tool method not found", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
 		{name: "discovery authentication", method: "server/discover", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
@@ -250,12 +249,6 @@ func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 		},
 		{name: "native discovery", method: "server/discover", status: 200, body: `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"resources":{},"tools":{"listChanged":true}}}}`},
 		{name: "oversized ordinary error", status: 400, body: strings.Repeat("ordinary upstream error", mcp.DefaultMaxLineLength/10)},
-		{
-			name:    "request header mismatch",
-			status:  400,
-			body:    `{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"unsupported"}}`,
-			headers: http.Header{"Mcp-Name": {"other-tool"}},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
@@ -268,7 +261,6 @@ func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 				io.WriteString(w, tc.body)
 			})
 			r := legacyRequest(t, endpoint, cmp.Or(tc.method, "tools/call"), "alice")
-			maps.Copy(r.Header, tc.headers)
 			response, err := transport.RoundTrip(r)
 			if err != nil {
 				t.Fatal(err)
@@ -307,48 +299,28 @@ func TestLegacyCancellationDoesNotReplayTool(t *testing.T) {
 }
 
 func TestLegacyFailuresDoNotReplayTools(t *testing.T) {
-	for _, tc := range []struct {
-		name, version, wantError string
-		executions               int32
-	}{
-		{name: "current negotiated version", version: proxy.CurrentVersion, wantError: "upstream did not negotiate a legacy MCP protocol"},
-		{name: "RPC failure after dispatch", version: "2025-06-18", executions: 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var executions atomic.Int32
-			transport, endpoint := legacyTestTransport(t, legacyTestProvider(tc.version, func(w http.ResponseWriter, _ *http.Request, req *jsonrpc.Request) {
-				executions.Add(1)
-				mcphttp.WriteError(w, http.StatusOK, req.ID, &jsonrpc.Error{
-					Code: -32603, Message: "tool execution failed", Data: json.RawMessage(`{"detail":"preserved"}`),
-				})
-			}))
-			response, err := transport.RoundTrip(legacyRequest(t, endpoint, "tools/call", "alice"))
-			if response != nil {
-				defer response.Body.Close()
-			}
-			if executions.Load() != tc.executions {
-				t.Fatalf("unexpected tool executions %d", executions.Load())
-			}
-			if tc.wantError != "" {
-				if err == nil || err.Error() != tc.wantError {
-					t.Fatalf("expected %q, got %v", tc.wantError, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			var reply struct {
-				ID    int
-				Error *struct {
-					Code int
-					Data struct{ Detail string }
-				}
-			}
-			if json.NewDecoder(response.Body).Decode(&reply) != nil || response.StatusCode != 200 || reply.ID != 1 || reply.Error == nil || reply.Error.Code != -32603 || reply.Error.Data.Detail != "preserved" {
-				t.Fatalf("lost RPC failure: %+v", reply)
-			}
+	var executions atomic.Int32
+	transport, endpoint := legacyTestTransport(t, legacyTestProvider("2025-06-18", func(w http.ResponseWriter, _ *http.Request, req *jsonrpc.Request) {
+		executions.Add(1)
+		mcphttp.WriteError(w, http.StatusOK, req.ID, &jsonrpc.Error{
+			Code: -32603, Message: "tool execution failed", Data: json.RawMessage(`{"detail":"preserved"}`),
 		})
+	}))
+	response, err := transport.RoundTrip(legacyRequest(t, endpoint, "tools/call", "alice"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var reply struct {
+		ID    int
+		Error *struct {
+			Code int
+			Data struct{ Detail string }
+		}
+	}
+	if json.NewDecoder(response.Body).Decode(&reply) != nil || response.StatusCode != 200 || reply.ID != 1 || reply.Error == nil ||
+		reply.Error.Code != -32603 || reply.Error.Data.Detail != "preserved" || executions.Load() != 1 {
+		t.Fatalf("lost RPC failure or replayed tool: %+v, %d executions", reply, executions.Load())
 	}
 }
 
