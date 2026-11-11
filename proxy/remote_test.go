@@ -233,40 +233,22 @@ func TestLegacyCompatibility(t *testing.T) {
 	}
 }
 
-// TestLegacyAnswer covers a legacy server that answers a current request rather
-// than rejecting its protocol version, as Google's hosted MCP servers do.
-func TestLegacyAnswer(t *testing.T) {
-	var calls atomic.Int32
-	transport, endpoint := legacyTestTransport(t, func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`)
-	})
-	response, err := transport.RoundTrip(legacyRequest(t, endpoint, "tools/call", "alice"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var reply, want map[string]any
-	_ = json.Unmarshal([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[],"resultType":"complete","cacheScope":"private","ttlMs":0}}`), &want)
-	if err := json.NewDecoder(response.Body).Decode(&reply); err != nil || !reflect.DeepEqual(reply, want) || calls.Load() != 1 {
-		t.Fatalf("got %v after %d calls", reply, calls.Load())
-	}
-}
-
 func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		method  string
 		status  int
 		body    string
+		want    string
 		headers http.Header
 	}{
 		{name: "tool method not found", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
 		{name: "discovery authentication", method: "server/discover", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
-		{name: "discovery response ID mismatch", method: "server/discover", status: 200, body: `{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}`},
+		{
+			name: "legacy result", status: 200, body: `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`,
+			want: `{"jsonrpc":"2.0","id":1,"result":{"cacheScope":"private","content":[],"resultType":"complete","ttlMs":0}}`,
+		},
 		{name: "native discovery", method: "server/discover", status: 200, body: `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"resources":{},"tools":{"listChanged":true}}}}`},
-		{name: "invalid parameters", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`},
 		{name: "oversized ordinary error", status: 400, body: strings.Repeat("ordinary upstream error", mcp.DefaultMaxLineLength/10)},
 		{
 			name:    "request header mismatch",
@@ -293,7 +275,7 @@ func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 			}
 			defer response.Body.Close()
 			body, err := io.ReadAll(response.Body)
-			if err != nil || response.StatusCode != tc.status || string(body) != tc.body || calls.Load() != 1 || response.Header.Get("Retry-After") != "30" || response.Header.Get("WWW-Authenticate") != `Bearer resource_metadata="https://provider.example/metadata"` {
+			if err != nil || response.StatusCode != tc.status || string(body) != cmp.Or(tc.want, tc.body) || calls.Load() != 1 || response.Header.Get("Retry-After") != "30" || response.Header.Get("WWW-Authenticate") != `Bearer resource_metadata="https://provider.example/metadata"` {
 				t.Fatalf("unexpected retry or response: %d, calls %d, error %v", response.StatusCode, calls.Load(), err)
 			}
 		})

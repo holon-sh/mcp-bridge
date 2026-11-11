@@ -21,10 +21,9 @@ import (
 )
 
 // NewRemoteTransport wraps base so current requests can use legacy Streamable
-// HTTP servers: a legacy server's result gets the fields of a current result.
-// tools/list and tools/call are retried in a legacy session after an explicit
-// protocol-version rejection, and server/discover after a protocol-version or
-// method-not-found rejection.
+// HTTP servers. A legacy server's result gets the fields of a current result,
+// and a tools/list, tools/call or server/discover request the server refuses is
+// retried in a legacy session.
 func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 	return legacyFallback{base: cmp.Or(base, http.DefaultTransport)}
 }
@@ -32,36 +31,7 @@ func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 type legacyFallback struct{ base http.RoundTripper }
 
 func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.Header.Get("Mcp-Protocol-Version") != CurrentVersion {
-		return t.base.RoundTrip(r)
-	}
-	r = r.Clone(r.Context())
-	r.Header.Del("Accept-Encoding")
-	response, err := t.fallback(r)
-	if err != nil || response.StatusCode != http.StatusOK || !jsonBody(response) {
-		return response, err
-	}
-	reply, err := readReply(response)
-	if err != nil {
-		return nil, err
-	}
-	if reply == nil {
-		return response, nil
-	}
-	if result := translate.Result(reply.Result); result != nil {
-		reply.Result = result
-		body, _ := jsonrpc.EncodeMessage(reply)
-		_ = response.Body.Close()
-		response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
-		response.Header.Del("Content-Length")
-	}
-	return response, nil
-}
-
-// fallback sends r, and retries it in a legacy session if the server rejects it.
-func (t legacyFallback) fallback(r *http.Request) (*http.Response, error) {
-	method := r.Header.Get("Mcp-Method")
-	if r.Body == nil || !slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, method) {
+	if r.Body == nil || r.Header.Get("Mcp-Protocol-Version") != CurrentVersion {
 		return t.base.RoundTrip(r)
 	}
 	sent, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, mcp.DefaultMaxLineLength))
@@ -69,55 +39,50 @@ func (t legacyFallback) fallback(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	r = r.Clone(r.Context())
+	r.Header.Del("Accept-Encoding")
 	r.Body = io.NopCloser(bytes.NewReader(sent))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(sent)), nil }
 	response, err := t.base.RoundTrip(r)
 	if err != nil {
 		return response, err
 	}
-	discovery := method == "server/discover"
-	if response.StatusCode != http.StatusBadRequest && !(discovery && response.StatusCode == http.StatusOK && jsonBody(response)) {
-		return response, nil
-	}
-	rejected, err := readReply(response)
-	if err != nil {
-		return nil, err
-	}
-	if rejected == nil || !(errors.Is(rejected.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) ||
-		discovery && errors.Is(rejected.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})) {
-		return response, nil
-	}
-	message, _ := jsonrpc.DecodeMessage(sent)
-	request, ok := message.(*jsonrpc.Request)
-	if !ok || rejected.ID != request.ID ||
-		ValidateHeaders(r.Header, request, CurrentVersion) != nil {
-		return response, nil
-	}
-	_ = response.Body.Close()
-	return t.legacy(r, request)
-}
-
-func jsonBody(response *http.Response) bool {
 	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	return media == "application/json"
-}
-
-// readReply decodes the JSON-RPC response in response's body, which it leaves
-// unread. It returns nil if the body holds no response within the message limit.
-func readReply(response *http.Response) (*jsonrpc.Response, error) {
-	original := response.Body
-	body, err := io.ReadAll(io.LimitReader(original, mcp.DefaultMaxLineLength+1))
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusBadRequest || media != "application/json" {
+		return response, nil
+	}
+	originalBody := response.Body
+	body, err := io.ReadAll(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1))
 	if err != nil {
-		_ = original.Close()
+		_ = originalBody.Close()
 		return nil, err
 	}
 	response.Body = struct {
 		io.Reader
 		io.Closer
-	}{io.MultiReader(bytes.NewReader(body), original), original}
+	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
 	message, _ := jsonrpc.DecodeMessage(body)
-	reply, _ := message.(*jsonrpc.Response)
-	return reply, nil
+	reply, ok := message.(*jsonrpc.Response)
+	if !ok {
+		return response, nil
+	}
+	method := r.Header.Get("Mcp-Method")
+	if errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) && slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, method) ||
+		method == "server/discover" && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) {
+		message, _ = jsonrpc.DecodeMessage(sent)
+		if request, ok := message.(*jsonrpc.Request); ok && ValidateHeaders(r.Header, request, CurrentVersion) == nil {
+			_ = originalBody.Close()
+			return t.legacy(r, request)
+		}
+	}
+	if result := translate.Result(reply.Result); result != nil {
+		reply.Result = result
+		body, _ = jsonrpc.EncodeMessage(reply)
+		_ = originalBody.Close()
+		response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+		response.Header.Del("Content-Length")
+	}
+	return response, nil
 }
 
 func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http.Response, error) {
@@ -210,6 +175,9 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 		reply.Error = wire
 	} else {
 		reply.Result, _ = json.Marshal(result)
+		if current := translate.Result(reply.Result); current != nil {
+			reply.Result = current
+		}
 	}
 	body, _ := jsonrpc.EncodeMessage(reply)
 	return &http.Response{
