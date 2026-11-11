@@ -4,9 +4,25 @@ package translate
 
 import (
 	"cmp"
+	"encoding/json"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// Result returns a legacy result with the fields every current result has, or
+// nil if result already has them. A legacy result is complete and carries no
+// caching hints, so it is private to the caller and immediately stale.
+func Result(result json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(result, &fields) != nil || fields == nil || fields["resultType"] != nil {
+		return nil
+	}
+	fields["resultType"] = json.RawMessage(`"complete"`)
+	fields["cacheScope"] = json.RawMessage(`"private"`)
+	fields["ttlMs"] = json.RawMessage(`0`)
+	current, _ := json.Marshal(fields)
+	return current
+}
 
 const appExtension = "io.modelcontextprotocol/ui"
 

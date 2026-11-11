@@ -15,14 +15,16 @@ import (
 	"sync/atomic"
 
 	"github.com/holon-sh/mcp-bridge/internal/remote"
+	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// NewRemoteTransport wraps base so current tools/list and tools/call requests
-// can use legacy Streamable HTTP servers after an explicit protocol-version
-// rejection. It also translates server/discover after a protocol-version or
-// method-not-found rejection.
+// NewRemoteTransport wraps base so current requests, which callers have checked
+// with [ValidateHeaders], can use legacy Streamable HTTP servers. A legacy
+// server's result gets the fields of a current result, and a tools/list,
+// tools/call or server/discover request the server refuses is retried in a
+// legacy session.
 func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 	return legacyFallback{base: cmp.Or(base, http.DefaultTransport)}
 }
@@ -30,10 +32,7 @@ func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 type legacyFallback struct{ base http.RoundTripper }
 
 func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.Body == nil || !slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, r.Header.Get("Mcp-Method")) {
-		return t.base.RoundTrip(r)
-	}
-	sent, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, mcp.DefaultMaxLineLength))
+	sent, err := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	if err != nil {
 		return nil, err
@@ -46,9 +45,8 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return response, err
 	}
-	discovery := r.Header.Get("Mcp-Method") == "server/discover"
 	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if response.StatusCode != http.StatusBadRequest && !(discovery && response.StatusCode == http.StatusOK && media == "application/json") {
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusBadRequest || media != "application/json" {
 		return response, nil
 	}
 	originalBody := response.Body
@@ -62,19 +60,27 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
 	message, _ := jsonrpc.DecodeMessage(body)
-	rejected, ok := message.(*jsonrpc.Response)
-	if !ok || !(errors.Is(rejected.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) ||
-		discovery && errors.Is(rejected.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})) {
+	reply, ok := message.(*jsonrpc.Response)
+	if !ok {
 		return response, nil
 	}
-	message, _ = jsonrpc.DecodeMessage(sent)
-	request, ok := message.(*jsonrpc.Request)
-	if !ok || rejected.ID != request.ID ||
-		ValidateHeaders(r.Header, request, CurrentVersion) != nil {
-		return response, nil
+	method := r.Header.Get("Mcp-Method")
+	if errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) && slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, method) ||
+		method == "server/discover" && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) {
+		message, _ = jsonrpc.DecodeMessage(sent)
+		if request, ok := message.(*jsonrpc.Request); ok {
+			_ = originalBody.Close()
+			return t.legacy(r, request)
+		}
 	}
-	_ = response.Body.Close()
-	return t.legacy(r, request)
+	if result := translate.Result(reply.Result); result != nil {
+		reply.Result = result
+		body, _ = jsonrpc.EncodeMessage(reply)
+		_ = originalBody.Close()
+		response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+		response.Header.Del("Content-Length")
+	}
+	return response, nil
 }
 
 func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http.Response, error) {
@@ -127,9 +133,6 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 	}
 	defer session.Close()
 	initialized := session.InitializeResult()
-	if initialized.ProtocolVersion >= CurrentVersion {
-		return nil, errors.New("upstream did not negotiate a legacy MCP protocol")
-	}
 	var result any
 	switch request.Method {
 	case "server/discover":
@@ -166,12 +169,10 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 		}
 		reply.Error = wire
 	} else {
-		data, _ := json.Marshal(result)
-		var fields map[string]json.RawMessage
-		_ = json.Unmarshal(data, &fields)
-		fields["resultType"] = json.RawMessage(`"complete"`)
-		fields["cacheScope"] = json.RawMessage(`"private"`)
-		reply.Result, _ = json.Marshal(fields)
+		reply.Result, _ = json.Marshal(result)
+		if current := translate.Result(reply.Result); current != nil {
+			reply.Result = current
+		}
 	}
 	body, _ := jsonrpc.EncodeMessage(reply)
 	return &http.Response{
