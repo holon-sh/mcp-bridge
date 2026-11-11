@@ -233,6 +233,56 @@ func TestLegacyCompatibility(t *testing.T) {
 	}
 }
 
+// TestLegacyAnswerToCurrentRequest covers a legacy server, such as Google's hosted MCP servers, that answers a
+// current request in its own shape rather than rejecting the protocol version.
+func TestLegacyAnswerToCurrentRequest(t *testing.T) {
+	for _, tc := range []struct{ name, method, result, want string }{
+		{
+			"legacy tool result", "tools/call", `{"content":[{"type":"text","text":"1 row"}],"structuredContent":{"n":9007199254740993},"isError":false}`,
+			`{"content":[{"type":"text","text":"1 row"}],"structuredContent":{"n":9007199254740993},"isError":false,"resultType":"complete","cacheScope":"private"}`,
+		},
+		{
+			"legacy tool list", "tools/list", `{"tools":[{"name":"execute_sql","inputSchema":{"type":"object"}}]}`,
+			`{"tools":[{"name":"execute_sql","inputSchema":{"type":"object"}}],"resultType":"complete","cacheScope":"private","ttlMs":0}`,
+		},
+		{"current tool result", "tools/call", `{"resultType":"input_required","inputRequests":{"confirm":{"method":"elicitation/create"}}}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := `{"id":1,"jsonrpc":"2.0","result":` + tc.result + `}`
+			transport, endpoint := legacyTestTransport(t, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+				io.WriteString(w, upstream)
+			})
+			response, err := transport.RoundTrip(legacyRequest(t, endpoint, tc.method, "alice"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			body, _ := io.ReadAll(response.Body)
+			if calls.Load() != 1 || response.StatusCode != http.StatusOK || response.ContentLength != int64(len(body)) {
+				t.Fatalf("HTTP %d, %d calls, length %d of %d", response.StatusCode, calls.Load(), response.ContentLength, len(body))
+			}
+			if tc.want == "" {
+				if string(body) != upstream {
+					t.Fatalf("current result changed: %s", body)
+				}
+				return
+			}
+			decode := func(data []byte) (value any) {
+				decoder := json.NewDecoder(bytes.NewReader(data))
+				decoder.UseNumber()
+				_ = decoder.Decode(&value)
+				return value
+			}
+			if got, want := decode(body), decode([]byte(`{"jsonrpc":"2.0","id":1,"result":`+tc.want+`}`)); !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %s, want %v", body, want)
+			}
+		})
+	}
+}
+
 func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

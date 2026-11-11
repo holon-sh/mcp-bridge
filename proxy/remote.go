@@ -21,7 +21,8 @@ import (
 
 // NewRemoteTransport wraps base so current tools/list and tools/call requests
 // can use legacy Streamable HTTP servers after an explicit protocol-version
-// rejection. It also translates server/discover after a protocol-version or
+// rejection, or translates the legacy result of a server that answers them
+// without one. It also translates server/discover after a protocol-version or
 // method-not-found rejection.
 func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 	return legacyFallback{base: cmp.Or(base, http.DefaultTransport)}
@@ -46,9 +47,11 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return response, err
 	}
-	discovery := r.Header.Get("Mcp-Method") == "server/discover"
+	method := r.Header.Get("Mcp-Method")
+	discovery := method == "server/discover"
 	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if response.StatusCode != http.StatusBadRequest && !(discovery && response.StatusCode == http.StatusOK && media == "application/json") {
+	answered := response.StatusCode == http.StatusOK && media == "application/json"
+	if response.StatusCode != http.StatusBadRequest && !answered {
 		return response, nil
 	}
 	originalBody := response.Body
@@ -62,19 +65,49 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
 	message, _ := jsonrpc.DecodeMessage(body)
-	rejected, ok := message.(*jsonrpc.Response)
-	if !ok || !(errors.Is(rejected.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) ||
-		discovery && errors.Is(rejected.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})) {
+	reply, ok := message.(*jsonrpc.Response)
+	if ok && answered && !discovery {
+		return legacyAnswer(response, reply, method), nil
+	}
+	if !ok || !(errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) ||
+		discovery && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})) {
 		return response, nil
 	}
 	message, _ = jsonrpc.DecodeMessage(sent)
 	request, ok := message.(*jsonrpc.Request)
-	if !ok || rejected.ID != request.ID ||
+	if !ok || reply.ID != request.ID ||
 		ValidateHeaders(r.Header, request, CurrentVersion) != nil {
 		return response, nil
 	}
 	_ = response.Body.Close()
 	return t.legacy(r, request)
+}
+
+// legacyAnswer translates the result of a legacy server that answered a current request rather than rejecting its
+// protocol version. Every current result has a resultType, so a result without one is a legacy result.
+func legacyAnswer(response *http.Response, reply *jsonrpc.Response, method string) *http.Response {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(reply.Result, &fields) != nil || fields == nil || fields["resultType"] != nil {
+		return response
+	}
+	reply.Result = currentResult(method, fields)
+	body, _ := jsonrpc.EncodeMessage(reply)
+	_ = response.Body.Close()
+	response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+	response.Header.Del("Content-Length")
+	return response
+}
+
+// currentResult adds the fields the current version requires to a legacy result. Its cacheScope is private because the
+// bridge cannot tell whether the result depends on the caller.
+func currentResult(method string, fields map[string]json.RawMessage) json.RawMessage {
+	fields["resultType"] = json.RawMessage(`"complete"`)
+	fields["cacheScope"] = json.RawMessage(`"private"`)
+	if _, ok := fields["ttlMs"]; !ok && method == "tools/list" {
+		fields["ttlMs"] = json.RawMessage(`0`)
+	}
+	result, _ := json.Marshal(fields)
+	return result
 }
 
 func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http.Response, error) {
@@ -169,9 +202,7 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 		data, _ := json.Marshal(result)
 		var fields map[string]json.RawMessage
 		_ = json.Unmarshal(data, &fields)
-		fields["resultType"] = json.RawMessage(`"complete"`)
-		fields["cacheScope"] = json.RawMessage(`"private"`)
-		reply.Result, _ = json.Marshal(fields)
+		reply.Result = currentResult(request.Method, fields)
 	}
 	body, _ := jsonrpc.EncodeMessage(reply)
 	return &http.Response{
