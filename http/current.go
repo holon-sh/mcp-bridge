@@ -124,7 +124,6 @@ func (b *currentBridge) initialize(ctx context.Context) error {
 		Capabilities:      translate.Capabilities(initialized.Capabilities),
 		Instructions:      initialized.Instructions,
 		Meta:              mcp.Meta{mcp.MetaKeyServerInfo: initialized.ServerInfo},
-		Cacheable:         mcp.Cacheable{CacheScope: "private"},
 	})
 	return b.write(ctx, &jsonrpc.Request{Method: "notifications/initialized"})
 }
@@ -293,6 +292,9 @@ func (b *currentBridge) route(msg jsonrpc.Message) {
 		if c != nil {
 			message.ID = c.original
 			c.completed = true
+		}
+		if result := translate.Result(message.Result); result != nil {
+			message.Result = result
 		}
 	case *jsonrpc.Request:
 		var params, meta map[string]json.RawMessage

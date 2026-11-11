@@ -15,14 +15,15 @@ import (
 	"sync/atomic"
 
 	"github.com/holon-sh/mcp-bridge/internal/remote"
+	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// NewRemoteTransport wraps base so current tools/list and tools/call requests
-// can use legacy Streamable HTTP servers after an explicit protocol-version
-// rejection, or translates the legacy result of a server that answers them
-// without one. It also translates server/discover after a protocol-version or
+// NewRemoteTransport wraps base so current requests can use legacy Streamable
+// HTTP servers: a legacy server's result gets the fields of a current result.
+// tools/list and tools/call are retried in a legacy session after an explicit
+// protocol-version rejection, and server/discover after a protocol-version or
 // method-not-found rejection.
 func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 	return legacyFallback{base: cmp.Or(base, http.DefaultTransport)}
@@ -31,7 +32,36 @@ func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 type legacyFallback struct{ base http.RoundTripper }
 
 func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.Body == nil || !slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, r.Header.Get("Mcp-Method")) {
+	if r.Header.Get("Mcp-Protocol-Version") != CurrentVersion {
+		return t.base.RoundTrip(r)
+	}
+	r = r.Clone(r.Context())
+	r.Header.Del("Accept-Encoding")
+	response, err := t.fallback(r)
+	if err != nil || response.StatusCode != http.StatusOK || !jsonBody(response) {
+		return response, err
+	}
+	reply, err := readReply(response)
+	if err != nil {
+		return nil, err
+	}
+	if reply == nil {
+		return response, nil
+	}
+	if result := translate.Result(reply.Result); result != nil {
+		reply.Result = result
+		body, _ := jsonrpc.EncodeMessage(reply)
+		_ = response.Body.Close()
+		response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+		response.Header.Del("Content-Length")
+	}
+	return response, nil
+}
+
+// fallback sends r, and retries it in a legacy session if the server rejects it.
+func (t legacyFallback) fallback(r *http.Request) (*http.Response, error) {
+	method := r.Header.Get("Mcp-Method")
+	if r.Body == nil || !slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, method) {
 		return t.base.RoundTrip(r)
 	}
 	sent, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, mcp.DefaultMaxLineLength))
@@ -39,43 +69,27 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	r = r.Clone(r.Context())
-	r.Header.Del("Accept-Encoding")
 	r.Body = io.NopCloser(bytes.NewReader(sent))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(sent)), nil }
 	response, err := t.base.RoundTrip(r)
 	if err != nil {
 		return response, err
 	}
-	method := r.Header.Get("Mcp-Method")
 	discovery := method == "server/discover"
-	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	answered := response.StatusCode == http.StatusOK && media == "application/json"
-	if response.StatusCode != http.StatusBadRequest && !answered {
+	if response.StatusCode != http.StatusBadRequest && !(discovery && response.StatusCode == http.StatusOK && jsonBody(response)) {
 		return response, nil
 	}
-	originalBody := response.Body
-	body, err := io.ReadAll(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1))
+	rejected, err := readReply(response)
 	if err != nil {
-		_ = originalBody.Close()
 		return nil, err
 	}
-	response.Body = struct {
-		io.Reader
-		io.Closer
-	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
-	message, _ := jsonrpc.DecodeMessage(body)
-	reply, ok := message.(*jsonrpc.Response)
-	if ok && answered && !discovery {
-		return legacyAnswer(response, reply, method), nil
-	}
-	if !ok || !(errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) ||
-		discovery && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})) {
+	if rejected == nil || !(errors.Is(rejected.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) ||
+		discovery && errors.Is(rejected.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})) {
 		return response, nil
 	}
-	message, _ = jsonrpc.DecodeMessage(sent)
+	message, _ := jsonrpc.DecodeMessage(sent)
 	request, ok := message.(*jsonrpc.Request)
-	if !ok || reply.ID != request.ID ||
+	if !ok || rejected.ID != request.ID ||
 		ValidateHeaders(r.Header, request, CurrentVersion) != nil {
 		return response, nil
 	}
@@ -83,31 +97,27 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.legacy(r, request)
 }
 
-// legacyAnswer translates the result of a legacy server that answered a current request rather than rejecting its
-// protocol version. Every current result has a resultType, so a result without one is a legacy result.
-func legacyAnswer(response *http.Response, reply *jsonrpc.Response, method string) *http.Response {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(reply.Result, &fields) != nil || fields == nil || fields["resultType"] != nil {
-		return response
-	}
-	reply.Result = currentResult(method, fields)
-	body, _ := jsonrpc.EncodeMessage(reply)
-	_ = response.Body.Close()
-	response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
-	response.Header.Del("Content-Length")
-	return response
+func jsonBody(response *http.Response) bool {
+	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	return media == "application/json"
 }
 
-// currentResult adds the fields the current version requires to a legacy result. Its cacheScope is private because the
-// bridge cannot tell whether the result depends on the caller.
-func currentResult(method string, fields map[string]json.RawMessage) json.RawMessage {
-	fields["resultType"] = json.RawMessage(`"complete"`)
-	fields["cacheScope"] = json.RawMessage(`"private"`)
-	if _, ok := fields["ttlMs"]; !ok && method == "tools/list" {
-		fields["ttlMs"] = json.RawMessage(`0`)
+// readReply decodes the JSON-RPC response in response's body, which it leaves
+// unread. It returns nil if the body holds no response within the message limit.
+func readReply(response *http.Response) (*jsonrpc.Response, error) {
+	original := response.Body
+	body, err := io.ReadAll(io.LimitReader(original, mcp.DefaultMaxLineLength+1))
+	if err != nil {
+		_ = original.Close()
+		return nil, err
 	}
-	result, _ := json.Marshal(fields)
-	return result
+	response.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(body), original), original}
+	message, _ := jsonrpc.DecodeMessage(body)
+	reply, _ := message.(*jsonrpc.Response)
+	return reply, nil
 }
 
 func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http.Response, error) {
@@ -199,10 +209,7 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 		}
 		reply.Error = wire
 	} else {
-		data, _ := json.Marshal(result)
-		var fields map[string]json.RawMessage
-		_ = json.Unmarshal(data, &fields)
-		reply.Result = currentResult(request.Method, fields)
+		reply.Result, _ = json.Marshal(result)
 	}
 	body, _ := jsonrpc.EncodeMessage(reply)
 	return &http.Response{

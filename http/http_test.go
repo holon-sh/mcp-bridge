@@ -754,6 +754,10 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool,
 	if len(result.Content) == 0 {
 		t.Fatal("tool response lost readable content")
 	}
+	var wire struct{ ResultType string }
+	if raw, _ := json.Marshal(result); json.Unmarshal(raw, &wire) != nil || !legacy && wire.ResultType != "complete" {
+		t.Fatalf("result type %q", wire.ResultType)
+	}
 	if translated {
 		meta := value["meta"].(map[string]any)
 		caps := meta[mcp.MetaKeyClientCapabilities].(map[string]any)
