@@ -255,9 +255,11 @@ func ParseHeaders(headers http.Header, expected string) (method, name string, is
 // ValidateHeaders checks that the headers accepted by [ParseHeaders] match req
 // under the [server validation] rules. req must be non-nil. It returns nil on
 // success or a protocol error describing the mismatch. Tool argument headers
-// require [ValidateArgumentHeaders] separately.
+// require [ValidateArgumentHeaders] separately. Per [request metadata], clientInfo
+// is optional; when supplied, it must be a valid Implementation.
 //
 // [server validation]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
+// [request metadata]: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
 func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
 	method, name, issue := ParseHeaders(headers, expected)
 	if issue != nil {
@@ -274,8 +276,9 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 	var info mcp.Implementation
 	var capabilities map[string]json.RawMessage
 	_ = json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities)
-	if json.Unmarshal(meta[mcp.MetaKeyClientInfo], &info) != nil || info.Name == "" || info.Version == "" || capabilities == nil {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "clientInfo and clientCapabilities are required"}
+	rawInfo := meta[mcp.MetaKeyClientInfo]
+	if capabilities == nil || rawInfo != nil && (json.Unmarshal(rawInfo, &info) != nil || info.Name == "" || info.Version == "") {
+		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid clientInfo or clientCapabilities"}
 	}
 	if method != req.Method {
 		return Mismatch("Mcp-Method")
