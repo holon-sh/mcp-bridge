@@ -30,7 +30,7 @@ func TestValidateHeaders(t *testing.T) {
 	}{
 		{name: "call", method: "tools/call", params: call, headers: http.Header{"Mcp-Name": {"echo"}}},
 		{name: "encoded name", method: "tools/call", params: `{"name":"发布",` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"=?base64?5Y+R5biD?="}}},
-		{name: "list"},
+		{name: "list without client info", params: `{` + meta(version, capabilities) + `}`},
 		{name: "missing version header", headers: http.Header{"Mcp-Protocol-Version": nil}, fault: "header"},
 		{name: "duplicate version header", headers: http.Header{"Mcp-Protocol-Version": {"2026-07-28", "2099-01-01"}}, fault: "header"},
 		{name: "unsupported version header", headers: http.Header{"Mcp-Protocol-Version": {"2099-01-01"}}, fault: "header"},
