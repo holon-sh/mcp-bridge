@@ -205,8 +205,8 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "initialize" {
 		var params mcp.InitializeParams
 		_ = json.Unmarshal(req.Params, &params)
-		if header := r.Header.Get("Mcp-Protocol-Version"); header != "" && header != params.ProtocolVersion {
-			WriteError(w, 400, req.ID, proxy.Mismatch("Mcp-Protocol-Version"))
+		if header := r.Header.Get(proxy.HeaderProtocolVersion); header != "" && header != params.ProtocolVersion {
+			WriteError(w, 400, req.ID, proxy.Mismatch(proxy.HeaderProtocolVersion))
 			return
 		}
 		if issue := prepareInitialize(req, b.version); issue != nil {
@@ -214,7 +214,7 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		setBody(r, req)
-		r.Header.Set("Mcp-Protocol-Version", b.version)
+		r.Header.Set(proxy.HeaderProtocolVersion, b.version)
 		id := rand.Text()
 		t := &mcp.StreamableServerTransport{SessionID: id, EventStore: b.legacyEvents}
 		s, err := b.newSession(id, t)
@@ -226,7 +226,7 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.version != "" {
-		issue := proxy.UnsupportedVersion(r.Header.Get("Mcp-Protocol-Version"), []string{b.version})
+		issue := proxy.UnsupportedVersion(r.Header.Get(proxy.HeaderProtocolVersion), []string{b.version})
 		id := jsonrpc.ID{}
 		if req, ok := msg.(*jsonrpc.Request); ok {
 			id = req.ID
@@ -405,7 +405,7 @@ func (s *legacySession) close() {
 }
 
 func (b *Server) serveLegacy(w http.ResponseWriter, r *http.Request, id string, sse bool) {
-	if version := r.Header.Get("Mcp-Protocol-Version"); version != "" {
+	if version := r.Header.Get(proxy.HeaderProtocolVersion); version != "" {
 		supported := mcp.SupportedProtocolVersions()
 		if b.version != "" {
 			supported = []string{b.version}

@@ -39,7 +39,7 @@ func TestLegacyClients(t *testing.T) {
 		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "ui://board/view.html", Text: "<html></html>"}}}, nil
 	})
 	current := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	bridge := httptest.NewServer(mcphttp.WithLegacyClients(current, func(string) http.Handler { return current }, proxy.MaxMessageBytes))
+	bridge := httptest.NewServer(mcphttp.WithLegacyClients(current, proxy.MaxMessageBytes))
 	defer bridge.Close()
 	for _, version := range []string{"2025-03-26", "2025-06-18", "2025-11-25"} {
 		t.Run(version, func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestLegacyClientsEvents(t *testing.T) {
 			close(cancelled)
 		}
 	})
-	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, func(string) http.Handler { return upstream }, proxy.MaxMessageBytes))
+	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, proxy.MaxMessageBytes))
 	defer bridge.Close()
 	post := func(ctx context.Context, body string) *http.Response {
 		r, _ := http.NewRequestWithContext(ctx, "POST", bridge.URL, strings.NewReader(body))
@@ -156,7 +156,7 @@ func TestLegacyClientsBoundaries(t *testing.T) {
 				w.WriteHeader(cmp.Or(tc.upstream, http.StatusTeapot))
 				io.WriteString(w, tc.reply)
 			})
-			handler := mcphttp.WithLegacyClients(upstream, func(string) http.Handler { return upstream }, 1<<10)
+			handler := mcphttp.WithLegacyClients(upstream, 1<<10)
 			r := httptest.NewRequest(tc.method, "https://example.test/mcp", strings.NewReader(tc.body))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Accept", "application/json, text/event-stream")

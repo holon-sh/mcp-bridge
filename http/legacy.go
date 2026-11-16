@@ -23,7 +23,6 @@ import (
 // WithLegacyClients lets clients of the 2025 Streamable HTTP protocol versions
 // use next, a handler for the current version, without sessions. next receives
 // each of their requests as a current request with the same credentials.
-// catalog(tool) must answer tools/list with the named tool's definition.
 // Current requests reach next unchanged.
 //
 // Authentication must wrap this handler. A 2025 request body larger than
@@ -32,14 +31,14 @@ import (
 //
 // 2025 clients cannot receive server-initiated requests or subscriptions, and
 // next does not see the capabilities they declare.
-func WithLegacyClients(next http.Handler, catalog func(tool string) http.Handler, maxMessageBytes int64) http.Handler {
+func WithLegacyClients(next http.Handler, maxMessageBytes int64) http.Handler {
 	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
 	origins := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A request without a [protocol version header] uses 2025-03-26.
 		//
 		// [protocol version header]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
-		if !slices.Contains(legacyHTTPVersions, cmp.Or(r.Header.Get("Mcp-Protocol-Version"), "2025-03-26")) {
+		if !slices.Contains(legacyHTTPVersions, cmp.Or(r.Header.Get(proxy.HeaderProtocolVersion), "2025-03-26")) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -63,7 +62,7 @@ func WithLegacyClients(next http.Handler, catalog func(tool string) http.Handler
 		case "initialize":
 			initializeLegacy(w, r, next, request)
 		default:
-			forwardLegacy(w, r, next, catalog, request)
+			forwardLegacy(w, r, next, request)
 		}
 	})
 }
@@ -76,7 +75,7 @@ func legacyLifecycle(server *mcp.Server) http.Handler {
 
 func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(proxy.CurrentVersion)})
-	result, err := query(w, r, next, request.ID, "server/discover", params)
+	result, err := query(w, r, next, request.ID, proxy.MethodDiscover, params)
 	if err != nil {
 		return
 	}
@@ -118,7 +117,7 @@ func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler,
 
 const eventsExtension = "io.modelcontextprotocol/events"
 
-func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, catalog func(string) http.Handler, request *jsonrpc.Request) {
+func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
 	params := map[string]json.RawMessage{}
 	var meta map[string]json.RawMessage
 	if _ = json.Unmarshal(request.Params, &params); params == nil {
@@ -130,11 +129,9 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, ca
 	_ = json.Unmarshal(bridge, &meta)
 	params["_meta"], _ = json.Marshal(meta)
 	request.Params, _ = json.Marshal(params)
-	var tool string
-	_ = json.Unmarshal(params["name"], &tool)
 	r = currentRequest(r.Context(), r, request)
 	err := proxy.SetHeaders(r.Context(), r.Header, request, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
-		return query(w, r.WithContext(ctx), catalog(tool), request.ID, method, params)
+		return query(w, r.WithContext(ctx), next, request.ID, method, params)
 	})
 	switch {
 	case errors.Is(err, errAnswered):
@@ -171,8 +168,8 @@ func copyResponse(w http.ResponseWriter, response *httptest.ResponseRecorder) {
 func currentRequest(ctx context.Context, r *http.Request, request *jsonrpc.Request) *http.Request {
 	r = r.Clone(ctx)
 	maps.DeleteFunc(r.Header, func(key string, _ []string) bool { return strings.HasPrefix(strings.ToLower(key), "mcp-") })
-	r.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
-	r.Header.Set("Mcp-Method", request.Method)
+	r.Header.Set(proxy.HeaderProtocolVersion, proxy.CurrentVersion)
+	r.Header.Set(proxy.HeaderMethod, request.Method)
 	setBody(r, request)
 	return r
 }

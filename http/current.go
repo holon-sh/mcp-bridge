@@ -82,7 +82,7 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(version)})
-	result, err := b.request(probeCtx, "server/discover", params, nil)
+	result, err := b.request(probeCtx, proxy.MethodDiscover, params, nil)
 	if errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) || errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams}) {
 		// Servers that predate MCP 2026-07-28 reject server/discover: the TypeScript and
 		// Go SDKs as an unknown method, the Python SDK as invalid params. After a legacy
@@ -204,7 +204,7 @@ func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request, header 
 	}
 	b.pending[c.id] = c
 	b.mu.Unlock()
-	if req.Method == "server/discover" && b.discovery != nil {
+	if req.Method == proxy.MethodDiscover && b.discovery != nil {
 		b.route(&jsonrpc.Response{ID: id, Result: b.discovery})
 		return c, nil
 	}
