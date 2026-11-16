@@ -27,10 +27,10 @@ func Request(t *testing.T, method string, params map[string]any) *http.Request {
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example/mcp", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Mcp-Protocol-Version", proxy.CurrentVersion)
-	req.Header.Set("Mcp-Method", method)
-	if method == "tools/call" {
-		req.Header.Set("Mcp-Name", fmt.Sprint(params["name"]))
+	req.Header.Set(proxy.HeaderProtocolVersion, proxy.CurrentVersion)
+	req.Header.Set(proxy.HeaderMethod, method)
+	if method == proxy.MethodCallTool {
+		req.Header.Set(proxy.HeaderName, fmt.Sprint(params["name"]))
 	}
 	return req
 }

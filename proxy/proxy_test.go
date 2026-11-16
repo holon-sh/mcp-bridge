@@ -72,6 +72,16 @@ func TestToolHeaderArgumentsBoundsPagination(t *testing.T) {
 	}
 }
 
+func TestSetToolHeaders(t *testing.T) {
+	headers := http.Header{}
+	err := proxy.SetToolHeaders(headers, &jsonrpc.Request{Method: "tools/call", Params: json.RawMessage(`{"name":"echo","arguments":{"region":"eu"}}`)},
+		json.RawMessage(`{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}}}`))
+	want := http.Header{"Mcp-Method": {"tools/call"}, "Mcp-Name": {"echo"}, "Mcp-Param-Region": {"eu"}}
+	if err != nil || !reflect.DeepEqual(headers, want) {
+		t.Fatalf("headers = %v, %v; want %v", headers, err, want)
+	}
+}
+
 func TestPages(t *testing.T) {
 	const tool = `{"name":"echo","inputSchema":{"const":9007199254740993},"extension":{"retained":true}}`
 	var wantTools []map[string]json.RawMessage

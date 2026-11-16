@@ -64,9 +64,9 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	if !ok {
 		return response, nil
 	}
-	method := r.Header.Get("Mcp-Method")
-	if errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) && slices.Contains([]string{"server/discover", "tools/list", "tools/call"}, method) ||
-		method == "server/discover" && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) {
+	method := r.Header.Get(HeaderMethod)
+	if errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) && slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) ||
+		method == MethodDiscover && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) {
 		message, _ = jsonrpc.DecodeMessage(sent)
 		if request, ok := message.(*jsonrpc.Request); ok {
 			_ = originalBody.Close()
@@ -135,7 +135,7 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 	initialized := session.InitializeResult()
 	var result any
 	switch request.Method {
-	case "server/discover":
+	case MethodDiscover:
 		capabilities := &mcp.ServerCapabilities{}
 		if initialized.Capabilities != nil && initialized.Capabilities.Tools != nil {
 			capabilities.Tools = &mcp.ToolCapabilities{}
@@ -146,7 +146,7 @@ func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http
 			Instructions:      initialized.Instructions,
 			Meta:              mcp.Meta{mcp.MetaKeyServerInfo: initialized.ServerInfo},
 		}
-	case "tools/list":
+	case MethodListTools:
 		var p mcp.ListToolsParams
 		if err = json.Unmarshal(raw, &p); err == nil {
 			result, err = session.ListTools(r.Context(), &p)

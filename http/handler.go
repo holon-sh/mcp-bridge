@@ -69,7 +69,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, req.ID, issue)
 		return
 	}
-	if req.Method == "tools/call" {
+	if req.Method == proxy.MethodCallTool {
 		lookup := func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 			return b.request(ctx, method, params, r.Header)
 		}
@@ -119,7 +119,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 			return
 		}
 		response, isResponse := message.(*jsonrpc.Response)
-		if isResponse && response.Error == nil && b.pinned && req.Method == "server/discover" {
+		if isResponse && response.Error == nil && b.pinned && req.Method == proxy.MethodDiscover {
 			var result map[string]json.RawMessage
 			if json.Unmarshal(response.Result, &result) != nil || result == nil {
 				WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid discovery response"})

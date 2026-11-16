@@ -61,7 +61,7 @@ func connectRemote(ctx context.Context, transport mcp.Transport) (mcp.Connection
 			version := r.version
 			r.mu.Unlock()
 			if version != "" {
-				req.Header.Set("Mcp-Protocol-Version", version)
+				req.Header.Set(proxy.HeaderProtocolVersion, version)
 			}
 			headers, _ := req.Context().Value(remoteHeadersKey{}).(http.Header)
 			maps.Copy(req.Header, headers)

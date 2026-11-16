@@ -17,6 +17,19 @@ const (
 	MaxRequests = 64
 )
 
+// The [MCP methods] that the bridge sends or that carry a name in the
+// [standard request headers].
+//
+// [MCP methods]: https://modelcontextprotocol.io/specification/2026-07-28/schema
+// [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
+const (
+	MethodDiscover     = "server/discover"
+	MethodListTools    = "tools/list"
+	MethodCallTool     = "tools/call"
+	MethodReadResource = "resources/read"
+	MethodGetPrompt    = "prompts/get"
+)
+
 // IsLegacyVersion reports whether version is a supported MCP revision older
 // than [CurrentVersion].
 func IsLegacyVersion(version string) bool {
