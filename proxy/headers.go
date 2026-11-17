@@ -42,13 +42,11 @@ type HeaderArgument struct {
 	value any
 }
 
-// ToolHeaderArguments identifies the HTTP headers required by a tools/call request.
-// Schema properties marked x-mcp-header select the arguments.
+// ToolHeaderArguments returns the [x-mcp-header] arguments of a tools/call,
+// as declared by the called tool's input schema. request sends the tools/list
+// requests that find the tool. It returns nil if the tool is not listed.
 //
-// The call argument is the parsed call. The request callback sends catalog
-// requests and returns their JSON results.
-//
-// It returns nil if the tool is not found, or an error if the lookup fails.
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
 func ToolHeaderArguments(ctx context.Context, call Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
 	meta := maps.Clone(call.Meta)
 	delete(meta, "progressToken")
@@ -267,11 +265,11 @@ func ParseHeaders(headers http.Header, expected string) (method, name string, is
 }
 
 // Request is an MCP request whose body agrees with its [standard request
-// headers]. Name is the tool name, prompt name, or resource URI, for the methods
-// that have one. Params and Meta are the decoded params, empty when absent, and
-// params._meta.
+// headers]. Name is the value of the Mcp-Name header, and Params and Meta hold
+// the request's params and its [_meta].
 //
 // [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
+// [_meta]: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
 type Request struct {
 	Message *jsonrpc.Request
 	Name    string
@@ -279,17 +277,16 @@ type Request struct {
 	Meta    map[string]json.RawMessage
 }
 
-// ParseRequest checks that message is an MCP request whose params is absent or an
-// object and whose headers, accepted by [ParseHeaders], match it under the [server
-// validation] rules. Per [request metadata], clientInfo is optional; when
-// supplied, it must be a valid Implementation. Tool argument headers require
-// [ValidateArgumentHeaders] separately.
+// ParseRequest parses an MCP request for an intermediary, checking it against
+// its headers as [server validation] requires. [x-mcp-header] arguments are
+// checked separately by [ValidateArgumentHeaders].
 //
-// On failure it returns the error to answer with and a Request holding what it
-// decoded: Message if message is a request or notification, then Params and Meta.
+// On failure it returns the protocol error to answer with, and a Request
+// holding as much of the message as it could parse, so the answer can carry
+// the request's ID.
 //
 // [server validation]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
-// [request metadata]: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
 func ParseRequest(headers http.Header, message jsonrpc.Message, expected string) (Request, *jsonrpc.Error) {
 	req, _ := message.(*jsonrpc.Request)
 	if req == nil || !req.IsCall() {
