@@ -336,6 +336,7 @@ func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, 
 		if req.Method != MethodCallTool {
 			return nil, nil
 		}
+		_ = json.Unmarshal(call.Params["_meta"], &call.Meta)
 		return ToolHeaderArguments(ctx, call, request)
 	})
 }
@@ -354,7 +355,6 @@ func SetToolHeaders(headers http.Header, req *jsonrpc.Request, inputSchema json.
 func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([]HeaderArgument, error)) error {
 	call := Request{Message: req}
 	_ = json.Unmarshal(req.Params, &call.Params)
-	_ = json.Unmarshal(call.Params["_meta"], &call.Meta)
 	name, issue := requestName(req.Method, call.Params)
 	if issue != nil {
 		return issue
