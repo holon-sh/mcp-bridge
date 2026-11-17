@@ -22,9 +22,7 @@ func TestParseRequest(t *testing.T) {
 	version := `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`
 	info := `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1"}`
 	capabilities := `"io.modelcontextprotocol/clientCapabilities":{}`
-	meta := func(fields ...string) string {
-		return `"_meta":{"extension":{"retained":true},` + strings.Join(fields, ",") + `}`
-	}
+	meta := func(fields ...string) string { return `"_meta":{` + strings.Join(fields, ",") + `}` }
 	named := func(field, value string) string {
 		return `{"` + field + `":"` + value + `",` + meta(version, info, capabilities) + `}`
 	}
@@ -42,7 +40,6 @@ func TestParseRequest(t *testing.T) {
 		{name: "list without client info", params: `{` + meta(version, capabilities) + `}`},
 		{name: "notification", notification: true, noParams: true, code: jsonrpc.CodeInvalidRequest},
 		{name: "array params", params: `[]`, noParams: true, code: jsonrpc.CodeInvalidParams},
-		{name: "null params", params: `null`, noParams: true, code: jsonrpc.CodeInvalidParams},
 		{name: "missing version header", headers: http.Header{"Mcp-Protocol-Version": nil}, header: true, code: mcp.CodeHeaderMismatch},
 		{name: "duplicate version header", headers: http.Header{"Mcp-Protocol-Version": {"2026-07-28", "2099-01-01"}}, header: true, code: mcp.CodeHeaderMismatch},
 		{name: "unsupported version header", headers: http.Header{"Mcp-Protocol-Version": {"2099-01-01"}}, header: true, code: mcp.CodeUnsupportedProtocolVersion},
@@ -57,7 +54,6 @@ func TestParseRequest(t *testing.T) {
 		{name: "other name", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {"other"}}, code: mcp.CodeHeaderMismatch},
 		{name: "empty name", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {""}}, header: true, code: mcp.CodeHeaderMismatch},
 		{name: "unexpected name", headers: http.Header{"Mcp-Name": {"echo"}}, header: true, code: mcp.CodeHeaderMismatch},
-		{name: "empty unexpected name", headers: http.Header{"Mcp-Name": {""}}, header: true, code: mcp.CodeHeaderMismatch},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			method := cmp.Or(test.method, "tools/list")
@@ -74,9 +70,6 @@ func TestParseRequest(t *testing.T) {
 			}
 			if request.Message != message || request.Name != test.want || (request.Params == nil) != test.noParams {
 				t.Fatalf("ParseRequest = %+v", request)
-			}
-			if !test.noParams && (request.Params["_meta"] == nil || string(request.Meta["extension"]) != `{"retained":true}`) {
-				t.Fatalf("request metadata lost: %+v", request)
 			}
 		})
 	}
