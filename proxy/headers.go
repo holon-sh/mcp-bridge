@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"net/http"
 	"strconv"
@@ -41,21 +42,15 @@ type HeaderArgument struct {
 	value any
 }
 
-// ToolHeaderArguments identifies the HTTP headers required by a tools/call request.
-// Schema properties marked x-mcp-header select the arguments.
+// ToolHeaderArguments returns the [x-mcp-header] arguments of a tools/call,
+// as declared by the called tool's input schema. request sends the tools/list
+// requests that find the tool. It returns nil if the tool is not listed.
 //
-// The params argument contains the call parameters. The request callback sends
-// catalog requests and returns their JSON results.
-//
-// It returns nil if the tool is not found, or an error if the lookup fails.
-func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
-	var call struct {
-		Name string                     `json:"name"`
-		Meta map[string]json.RawMessage `json:"_meta"`
-	}
-	_ = json.Unmarshal(params, &call)
-	delete(call.Meta, "progressToken")
-	raw, _ := json.Marshal(map[string]any{"_meta": call.Meta})
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+func ToolHeaderArguments(ctx context.Context, call Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
+	meta := maps.Clone(call.Meta)
+	delete(meta, "progressToken")
+	raw, _ := json.Marshal(map[string]any{"_meta": meta})
 	pageCount := 0
 	for tools, err := range Pages[map[string]json.RawMessage](ctx, MethodListTools, "tools", raw, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if pageCount == 100 {
@@ -70,22 +65,20 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 		for _, tool := range tools {
 			var name string
 			if _ = json.Unmarshal(tool["name"], &name); name == call.Name {
-				return schemaArguments(tool["inputSchema"], params)
+				return schemaArguments(tool["inputSchema"], call.Params["arguments"])
 			}
 		}
 	}
 	return nil, nil
 }
 
-func schemaArguments(inputSchema, params json.RawMessage) ([]HeaderArgument, error) {
+func schemaArguments(inputSchema, rawArguments json.RawMessage) ([]HeaderArgument, error) {
 	var schema headerProperty
 	if err := json.Unmarshal(inputSchema, &schema); err != nil {
 		return nil, err
 	}
-	var call struct {
-		Arguments map[string]any `json:"arguments"`
-	}
-	_ = json.Unmarshal(params, &call)
+	var arguments map[string]any
+	_ = json.Unmarshal(rawArguments, &arguments)
 	var headers []HeaderArgument
 	var collect func(map[string]headerProperty, map[string]any)
 	collect = func(properties map[string]headerProperty, arguments map[string]any) {
@@ -98,7 +91,7 @@ func schemaArguments(inputSchema, params json.RawMessage) ([]HeaderArgument, err
 			collect(property.Properties, nested)
 		}
 	}
-	collect(schema.Properties, call.Arguments)
+	collect(schema.Properties, arguments)
 	return headers, nil
 }
 
@@ -231,7 +224,7 @@ func Mismatch(name string) *jsonrpc.Error {
 // Duplicate headers return HeaderMismatch; an explicit unsupported version
 // returns UnsupportedProtocolVersionError with negotiation data. Absence or an
 // empty value is allowed for legacy initialization and notifications; calls that
-// require the header use [ValidateHeaders].
+// require the header use [ParseRequest].
 func ValidateProtocolHeader(headers http.Header, expected string) *jsonrpc.Error {
 	if len(headers.Values(HeaderProtocolVersion)) > 1 {
 		return Mismatch(HeaderProtocolVersion)
@@ -271,45 +264,67 @@ func ParseHeaders(headers http.Header, expected string) (method, name string, is
 	return "", "", Mismatch(HeaderName)
 }
 
-// ValidateHeaders checks that the headers accepted by [ParseHeaders] match req
-// under the [server validation] rules. req must be non-nil. It returns nil on
-// success or a protocol error describing the mismatch. Tool argument headers
-// require [ValidateArgumentHeaders] separately. Per [request metadata], clientInfo
-// is optional; when supplied, it must be a valid Implementation.
+// Request is an MCP request whose body agrees with its [standard request
+// headers]. Name is the value of the Mcp-Name header, and Params and Meta hold
+// the request's params and its [_meta].
+//
+// [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
+// [_meta]: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
+type Request struct {
+	Message *jsonrpc.Request
+	Name    string
+	Params  map[string]json.RawMessage
+	Meta    map[string]json.RawMessage
+}
+
+// ParseRequest parses an MCP request for an intermediary, checking it against
+// its headers as [server validation] requires. [x-mcp-header] arguments are
+// checked separately by [ValidateArgumentHeaders].
+//
+// On failure it returns the protocol error to answer with, and a Request
+// holding as much of the message as it could parse, so the answer can carry
+// the request's ID.
 //
 // [server validation]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
-// [request metadata]: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
-func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+func ParseRequest(headers http.Header, message jsonrpc.Message, expected string) (Request, *jsonrpc.Error) {
+	req, _ := message.(*jsonrpc.Request)
+	if req == nil || !req.IsCall() {
+		return Request{Message: req}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "expected an MCP request"}
+	}
+	parsed := Request{Message: req, Params: map[string]json.RawMessage{}}
+	if req.Params != nil && (json.Unmarshal(req.Params, &parsed.Params) != nil || parsed.Params == nil) {
+		return Request{Message: req}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "params must be an object"}
+	}
+	_ = json.Unmarshal(parsed.Params["_meta"], &parsed.Meta)
 	method, name, issue := ParseHeaders(headers, expected)
 	if issue != nil {
-		return issue
+		return parsed, issue
 	}
-	var params, meta map[string]json.RawMessage
-	_ = json.Unmarshal(req.Params, &params)
-	_ = json.Unmarshal(params["_meta"], &meta)
 	var version string
-	_ = json.Unmarshal(meta[mcp.MetaKeyProtocolVersion], &version)
+	_ = json.Unmarshal(parsed.Meta[mcp.MetaKeyProtocolVersion], &version)
 	if version != expected {
-		return Mismatch(HeaderProtocolVersion)
+		return parsed, Mismatch(HeaderProtocolVersion)
 	}
 	var info mcp.Implementation
 	var capabilities map[string]json.RawMessage
-	_ = json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities)
-	rawInfo := meta[mcp.MetaKeyClientInfo]
+	_ = json.Unmarshal(parsed.Meta[mcp.MetaKeyClientCapabilities], &capabilities)
+	rawInfo := parsed.Meta[mcp.MetaKeyClientInfo]
 	if capabilities == nil || rawInfo != nil && (json.Unmarshal(rawInfo, &info) != nil || info.Name == "" || info.Version == "") {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid clientInfo or clientCapabilities"}
+		return parsed, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid clientInfo or clientCapabilities"}
 	}
 	if method != req.Method {
-		return Mismatch(HeaderMethod)
+		return parsed, Mismatch(HeaderMethod)
 	}
-	body, issue := requestName(method, params)
+	body, issue := requestName(method, parsed.Params)
 	if issue != nil {
-		return issue
+		return parsed, issue
 	}
 	if body.value != nil && body.value != name {
-		return Mismatch(HeaderName)
+		return parsed, Mismatch(HeaderName)
 	}
-	return nil
+	parsed.Name = name
+	return parsed, nil
 }
 
 // SetHeaders sets the [request metadata headers] for req, looking up tools/call
@@ -317,11 +332,12 @@ func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string)
 //
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) error {
-	return setHeaders(headers, req, func() ([]HeaderArgument, error) {
+	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
 		if req.Method != MethodCallTool {
 			return nil, nil
 		}
-		return ToolHeaderArguments(ctx, req.Params, request)
+		_ = json.Unmarshal(call.Params["_meta"], &call.Meta)
+		return ToolHeaderArguments(ctx, call, request)
 	})
 }
 
@@ -331,17 +347,20 @@ func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, 
 //
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetToolHeaders(headers http.Header, req *jsonrpc.Request, inputSchema json.RawMessage) error {
-	return setHeaders(headers, req, func() ([]HeaderArgument, error) { return schemaArguments(inputSchema, req.Params) })
+	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
+		return schemaArguments(inputSchema, call.Params["arguments"])
+	})
 }
 
-func setHeaders(headers http.Header, req *jsonrpc.Request, tool func() ([]HeaderArgument, error)) error {
-	var params map[string]json.RawMessage
-	_ = json.Unmarshal(req.Params, &params)
-	name, issue := requestName(req.Method, params)
+func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([]HeaderArgument, error)) error {
+	call := Request{Message: req}
+	_ = json.Unmarshal(req.Params, &call.Params)
+	name, issue := requestName(req.Method, call.Params)
 	if issue != nil {
 		return issue
 	}
-	arguments, err := tool()
+	call.Name, _ = name.value.(string)
+	arguments, err := tool(call)
 	if err != nil {
 		return err
 	}

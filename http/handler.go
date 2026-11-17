@@ -65,7 +65,8 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
 		return
 	}
-	if issue := proxy.ValidateHeaders(r.Header, req, b.version); issue != nil {
+	call, issue := proxy.ParseRequest(r.Header, req, b.version)
+	if issue != nil {
 		WriteError(w, 400, req.ID, issue)
 		return
 	}
@@ -73,13 +74,13 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		lookup := func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 			return b.request(ctx, method, params, r.Header)
 		}
-		arguments, err := proxy.ToolHeaderArguments(r.Context(), req.Params, lookup)
+		arguments, err := proxy.ToolHeaderArguments(r.Context(), call, lookup)
 		if err = errors.Join(err, proxy.ValidateArgumentHeaders(r.Header, arguments)); err != nil {
 			writeHeaderError(w, req.ID, err)
 			return
 		}
 	}
-	c, err := b.begin(r.Context(), req, r.Header)
+	c, err := b.begin(r.Context(), call, r.Header)
 	if err != nil {
 		WriteError(w, 503, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: err.Error()})
 		return

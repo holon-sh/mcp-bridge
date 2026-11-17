@@ -170,10 +170,8 @@ var traceContextKeys = []string{"traceparent", "tracestate", "baggage"}
 
 // begin forwards a call to the process. header is the HTTP request the call
 // serves, or nil for the bridge's own requests.
-func (b *currentBridge) begin(ctx context.Context, req *jsonrpc.Request, header http.Header) (*call, error) {
-	var params, meta map[string]json.RawMessage
-	_ = json.Unmarshal(req.Params, &params)
-	_ = json.Unmarshal(params["_meta"], &meta)
+func (b *currentBridge) begin(ctx context.Context, request proxy.Request, header http.Header) (*call, error) {
+	req, params, meta := request.Message, request.Params, request.Meta
 	c := &call{id: rand.Text(), original: req.ID, progress: meta["progressToken"], messages: make(chan delivery, 8)}
 	if c.progress != nil {
 		meta["progressToken"], _ = json.Marshal(c.id)
@@ -249,8 +247,10 @@ func (b *currentBridge) receive(ctx context.Context, c *call) (jsonrpc.Message, 
 }
 
 func (b *currentBridge) request(ctx context.Context, method string, params json.RawMessage, header http.Header) (json.RawMessage, error) {
-	id, _ := jsonrpc.MakeID("internal")
-	c, err := b.begin(ctx, &jsonrpc.Request{ID: id, Method: method, Params: params}, header)
+	request := proxy.Request{Message: &jsonrpc.Request{Method: method}}
+	_ = json.Unmarshal(params, &request.Params)
+	_ = json.Unmarshal(request.Params["_meta"], &request.Meta)
+	c, err := b.begin(ctx, request, header)
 	if err != nil {
 		return nil, err
 	}

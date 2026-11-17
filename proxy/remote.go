@@ -21,7 +21,7 @@ import (
 )
 
 // NewRemoteTransport wraps base so current requests, which callers have checked
-// with [ValidateHeaders], can use legacy Streamable HTTP servers. A legacy
+// with [ParseRequest], can use legacy Streamable HTTP servers. A legacy
 // server's result gets the fields of a current result, and a tools/list,
 // tools/call or server/discover request the server refuses is retried in a
 // legacy session.
