@@ -15,47 +15,60 @@ import (
 
 	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func TestValidateHeaders(t *testing.T) {
+func TestParseRequest(t *testing.T) {
 	version := `"io.modelcontextprotocol/protocolVersion":"2026-07-28"`
 	info := `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1"}`
 	capabilities := `"io.modelcontextprotocol/clientCapabilities":{}`
 	meta := func(fields ...string) string { return `"_meta":{` + strings.Join(fields, ",") + `}` }
-	call := `{"name":"echo",` + meta(version, info, capabilities) + `}`
+	named := func(field, value string) string {
+		return `{"` + field + `":"` + value + `",` + meta(version, info, capabilities) + `}`
+	}
+	id, _ := jsonrpc.MakeID("1")
 	for _, test := range []struct {
-		name, method, params string
-		headers              http.Header
-		fault                string
+		name, method, params, want string
+		headers                    http.Header
+		header, notification       bool
+		code                       int64
 	}{
-		{name: "call", method: "tools/call", params: call, headers: http.Header{"Mcp-Name": {"echo"}}},
-		{name: "encoded name", method: "tools/call", params: `{"name":"发布",` + meta(version, info, capabilities) + `}`, headers: http.Header{"Mcp-Name": {"=?base64?5Y+R5biD?="}}},
+		{name: "call", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {"echo"}}, want: "echo"},
+		{name: "resource", method: "resources/read", params: named("uri", "file:///a"), headers: http.Header{"Mcp-Name": {"file:///a"}}, want: "file:///a"},
+		{name: "encoded name", method: "tools/call", params: named("name", "发布"), headers: http.Header{"Mcp-Name": {"=?base64?5Y+R5biD?="}}, want: "发布"},
 		{name: "list without client info", params: `{` + meta(version, capabilities) + `}`},
-		{name: "missing version header", headers: http.Header{"Mcp-Protocol-Version": nil}, fault: "header"},
-		{name: "duplicate version header", headers: http.Header{"Mcp-Protocol-Version": {"2026-07-28", "2099-01-01"}}, fault: "header"},
-		{name: "unsupported version header", headers: http.Header{"Mcp-Protocol-Version": {"2099-01-01"}}, fault: "header"},
-		{name: "metadata version", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`, fault: "body"},
-		{name: "client name", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`, fault: "body"},
-		{name: "malformed client info", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1","icons":1}`, capabilities) + `}`, fault: "body"},
-		{name: "client version", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client"}`, capabilities) + `}`, fault: "body"},
-		{name: "client capabilities", params: `{` + meta(version, info) + `}`, fault: "body"},
-		{name: "duplicate method", headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}, fault: "header"},
-		{name: "other method", headers: http.Header{"Mcp-Method": {"prompts/list"}}, fault: "body"},
-		{name: "missing name", method: "tools/call", headers: http.Header{"Mcp-Name": {"echo"}}, fault: "body"},
-		{name: "empty name", method: "tools/call", params: call, headers: http.Header{"Mcp-Name": {""}}, fault: "header"},
-		{name: "unexpected name", headers: http.Header{"Mcp-Name": {"echo"}}, fault: "header"},
-		{name: "duplicate unexpected name", headers: http.Header{"Mcp-Name": {"echo", "echo"}}, fault: "header"},
-		{name: "empty unexpected name", headers: http.Header{"Mcp-Name": {""}}, fault: "header"},
+		{name: "notification", notification: true, code: jsonrpc.CodeInvalidRequest},
+		{name: "array params", params: `[]`, code: jsonrpc.CodeInvalidParams},
+		{name: "missing version header", headers: http.Header{"Mcp-Protocol-Version": nil}, header: true, code: mcp.CodeHeaderMismatch},
+		{name: "duplicate version header", headers: http.Header{"Mcp-Protocol-Version": {"2026-07-28", "2099-01-01"}}, header: true, code: mcp.CodeHeaderMismatch},
+		{name: "unsupported version header", headers: http.Header{"Mcp-Protocol-Version": {"2099-01-01"}}, header: true, code: mcp.CodeUnsupportedProtocolVersion},
+		{name: "metadata version", params: `{` + meta(`"io.modelcontextprotocol/protocolVersion":"2025-11-25"`, info, capabilities) + `}`, code: mcp.CodeHeaderMismatch},
+		{name: "client name", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"version":"1"}`, capabilities) + `}`, code: jsonrpc.CodeInvalidParams},
+		{name: "malformed client info", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client","version":"1","icons":1}`, capabilities) + `}`, code: jsonrpc.CodeInvalidParams},
+		{name: "client version", params: `{` + meta(version, `"io.modelcontextprotocol/clientInfo":{"name":"client"}`, capabilities) + `}`, code: jsonrpc.CodeInvalidParams},
+		{name: "client capabilities", params: `{` + meta(version, info) + `}`, code: jsonrpc.CodeInvalidParams},
+		{name: "duplicate method", headers: http.Header{"Mcp-Method": {"tools/list", "tools/list"}}, header: true, code: mcp.CodeHeaderMismatch},
+		{name: "other method", headers: http.Header{"Mcp-Method": {"prompts/list"}}, code: mcp.CodeHeaderMismatch},
+		{name: "missing name", method: "tools/call", headers: http.Header{"Mcp-Name": {"echo"}}, code: jsonrpc.CodeInvalidParams},
+		{name: "other name", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {"other"}}, code: mcp.CodeHeaderMismatch},
+		{name: "empty name", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {""}}, header: true, code: mcp.CodeHeaderMismatch},
+		{name: "unexpected name", headers: http.Header{"Mcp-Name": {"echo"}}, header: true, code: mcp.CodeHeaderMismatch},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			method := cmp.Or(test.method, "tools/list")
-			params := cmp.Or(test.params, `{`+meta(version, info, capabilities)+`}`)
 			headers := http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {method}}
 			maps.Copy(headers, test.headers)
+			message := &jsonrpc.Request{ID: id, Method: method, Params: json.RawMessage(cmp.Or(test.params, `{`+meta(version, info, capabilities)+`}`))}
+			if test.notification {
+				message.ID = jsonrpc.ID{}
+			}
 			_, _, headerErr := proxy.ParseHeaders(headers, proxy.CurrentVersion)
-			err := proxy.ValidateHeaders(headers, &jsonrpc.Request{Method: method, Params: json.RawMessage(params)}, proxy.CurrentVersion)
-			if (headerErr != nil) != (test.fault == "header") || (err != nil) != (test.fault != "") {
-				t.Fatalf("ParseHeaders = %v, ValidateHeaders = %v", headerErr, err)
+			request, err := proxy.ParseRequest(headers, message, proxy.CurrentVersion)
+			if (headerErr != nil) != test.header || cmp.Or(err, &jsonrpc.Error{}).Code != test.code {
+				t.Fatalf("ParseHeaders = %v, ParseRequest = %v", headerErr, err)
+			}
+			if request.Message != message || request.Name != test.want || (request.Params == nil) != (test.notification || test.params == `[]`) {
+				t.Fatalf("ParseRequest = %+v", request)
 			}
 		})
 	}

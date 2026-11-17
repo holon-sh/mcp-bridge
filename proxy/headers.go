@@ -231,7 +231,7 @@ func Mismatch(name string) *jsonrpc.Error {
 // Duplicate headers return HeaderMismatch; an explicit unsupported version
 // returns UnsupportedProtocolVersionError with negotiation data. Absence or an
 // empty value is allowed for legacy initialization and notifications; calls that
-// require the header use [ValidateHeaders].
+// require the header use [ParseRequest].
 func ValidateProtocolHeader(headers http.Header, expected string) *jsonrpc.Error {
 	if len(headers.Values(HeaderProtocolVersion)) > 1 {
 		return Mismatch(HeaderProtocolVersion)
@@ -271,45 +271,68 @@ func ParseHeaders(headers http.Header, expected string) (method, name string, is
 	return "", "", Mismatch(HeaderName)
 }
 
-// ValidateHeaders checks that the headers accepted by [ParseHeaders] match req
-// under the [server validation] rules. req must be non-nil. It returns nil on
-// success or a protocol error describing the mismatch. Tool argument headers
-// require [ValidateArgumentHeaders] separately. Per [request metadata], clientInfo
-// is optional; when supplied, it must be a valid Implementation.
+// Request is an MCP request whose body agrees with its [standard request
+// headers]. Name is the tool name, prompt name, or resource URI, for the methods
+// that have one. Params and Meta are the decoded params, empty when absent, and
+// params._meta.
+//
+// [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
+type Request struct {
+	Message *jsonrpc.Request
+	Name    string
+	Params  map[string]json.RawMessage
+	Meta    map[string]json.RawMessage
+}
+
+// ParseRequest checks that message is an MCP request whose params is absent or an
+// object and whose headers, accepted by [ParseHeaders], match it under the [server
+// validation] rules. Per [request metadata], clientInfo is optional; when
+// supplied, it must be a valid Implementation. Tool argument headers require
+// [ValidateArgumentHeaders] separately.
+//
+// On failure it returns the error to answer with and a Request holding what it
+// decoded: Message if message is a request or notification, then Params and Meta.
 //
 // [server validation]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
 // [request metadata]: https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
-func ValidateHeaders(headers http.Header, req *jsonrpc.Request, expected string) *jsonrpc.Error {
+func ParseRequest(headers http.Header, message jsonrpc.Message, expected string) (Request, *jsonrpc.Error) {
+	req, _ := message.(*jsonrpc.Request)
+	if req == nil || !req.IsCall() {
+		return Request{Message: req}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "expected an MCP request"}
+	}
+	parsed := Request{Message: req, Params: map[string]json.RawMessage{}}
+	if req.Params != nil && (json.Unmarshal(req.Params, &parsed.Params) != nil || parsed.Params == nil) {
+		return Request{Message: req}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "params must be an object"}
+	}
+	_ = json.Unmarshal(parsed.Params["_meta"], &parsed.Meta)
 	method, name, issue := ParseHeaders(headers, expected)
 	if issue != nil {
-		return issue
+		return parsed, issue
 	}
-	var params, meta map[string]json.RawMessage
-	_ = json.Unmarshal(req.Params, &params)
-	_ = json.Unmarshal(params["_meta"], &meta)
 	var version string
-	_ = json.Unmarshal(meta[mcp.MetaKeyProtocolVersion], &version)
+	_ = json.Unmarshal(parsed.Meta[mcp.MetaKeyProtocolVersion], &version)
 	if version != expected {
-		return Mismatch(HeaderProtocolVersion)
+		return parsed, Mismatch(HeaderProtocolVersion)
 	}
 	var info mcp.Implementation
 	var capabilities map[string]json.RawMessage
-	_ = json.Unmarshal(meta[mcp.MetaKeyClientCapabilities], &capabilities)
-	rawInfo := meta[mcp.MetaKeyClientInfo]
+	_ = json.Unmarshal(parsed.Meta[mcp.MetaKeyClientCapabilities], &capabilities)
+	rawInfo := parsed.Meta[mcp.MetaKeyClientInfo]
 	if capabilities == nil || rawInfo != nil && (json.Unmarshal(rawInfo, &info) != nil || info.Name == "" || info.Version == "") {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid clientInfo or clientCapabilities"}
+		return parsed, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "invalid clientInfo or clientCapabilities"}
 	}
 	if method != req.Method {
-		return Mismatch(HeaderMethod)
+		return parsed, Mismatch(HeaderMethod)
 	}
-	body, issue := requestName(method, params)
+	body, issue := requestName(method, parsed.Params)
 	if issue != nil {
-		return issue
+		return parsed, issue
 	}
 	if body.value != nil && body.value != name {
-		return Mismatch(HeaderName)
+		return parsed, Mismatch(HeaderName)
 	}
-	return nil
+	parsed.Name = name
+	return parsed, nil
 }
 
 // SetHeaders sets the [request metadata headers] for req, looking up tools/call

@@ -65,7 +65,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
 		return
 	}
-	if issue := proxy.ValidateHeaders(r.Header, req, b.version); issue != nil {
+	if _, issue := proxy.ParseRequest(r.Header, req, b.version); issue != nil {
 		WriteError(w, 400, req.ID, issue)
 		return
 	}
