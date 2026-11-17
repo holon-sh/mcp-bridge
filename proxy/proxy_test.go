@@ -76,7 +76,7 @@ func TestParseRequest(t *testing.T) {
 
 func TestToolHeaderArgumentsBoundsPagination(t *testing.T) {
 	pages := 0
-	_, err := proxy.ToolHeaderArguments(t.Context(), json.RawMessage(`{"name":"echo"}`), func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	_, err := proxy.ToolHeaderArguments(t.Context(), proxy.Request{Name: "echo"}, func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 		pages++
 		return json.Marshal(map[string]any{"tools": []any{}, "nextCursor": strings.Repeat("x", pages%101)})
 	})

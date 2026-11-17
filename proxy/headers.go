@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"net/http"
 	"strconv"
@@ -44,18 +45,14 @@ type HeaderArgument struct {
 // ToolHeaderArguments identifies the HTTP headers required by a tools/call request.
 // Schema properties marked x-mcp-header select the arguments.
 //
-// The params argument contains the call parameters. The request callback sends
-// catalog requests and returns their JSON results.
+// The call argument is the parsed call. The request callback sends catalog
+// requests and returns their JSON results.
 //
 // It returns nil if the tool is not found, or an error if the lookup fails.
-func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
-	var call struct {
-		Name string                     `json:"name"`
-		Meta map[string]json.RawMessage `json:"_meta"`
-	}
-	_ = json.Unmarshal(params, &call)
-	delete(call.Meta, "progressToken")
-	raw, _ := json.Marshal(map[string]any{"_meta": call.Meta})
+func ToolHeaderArguments(ctx context.Context, call Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
+	meta := maps.Clone(call.Meta)
+	delete(meta, "progressToken")
+	raw, _ := json.Marshal(map[string]any{"_meta": meta})
 	pageCount := 0
 	for tools, err := range Pages[map[string]json.RawMessage](ctx, MethodListTools, "tools", raw, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
 		if pageCount == 100 {
@@ -70,22 +67,20 @@ func ToolHeaderArguments(ctx context.Context, params json.RawMessage, request fu
 		for _, tool := range tools {
 			var name string
 			if _ = json.Unmarshal(tool["name"], &name); name == call.Name {
-				return schemaArguments(tool["inputSchema"], params)
+				return schemaArguments(tool["inputSchema"], call.Params["arguments"])
 			}
 		}
 	}
 	return nil, nil
 }
 
-func schemaArguments(inputSchema, params json.RawMessage) ([]HeaderArgument, error) {
+func schemaArguments(inputSchema, rawArguments json.RawMessage) ([]HeaderArgument, error) {
 	var schema headerProperty
 	if err := json.Unmarshal(inputSchema, &schema); err != nil {
 		return nil, err
 	}
-	var call struct {
-		Arguments map[string]any `json:"arguments"`
-	}
-	_ = json.Unmarshal(params, &call)
+	var arguments map[string]any
+	_ = json.Unmarshal(rawArguments, &arguments)
 	var headers []HeaderArgument
 	var collect func(map[string]headerProperty, map[string]any)
 	collect = func(properties map[string]headerProperty, arguments map[string]any) {
@@ -98,7 +93,7 @@ func schemaArguments(inputSchema, params json.RawMessage) ([]HeaderArgument, err
 			collect(property.Properties, nested)
 		}
 	}
-	collect(schema.Properties, call.Arguments)
+	collect(schema.Properties, arguments)
 	return headers, nil
 }
 
@@ -340,11 +335,11 @@ func ParseRequest(headers http.Header, message jsonrpc.Message, expected string)
 //
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) error {
-	return setHeaders(headers, req, func() ([]HeaderArgument, error) {
+	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
 		if req.Method != MethodCallTool {
 			return nil, nil
 		}
-		return ToolHeaderArguments(ctx, req.Params, request)
+		return ToolHeaderArguments(ctx, call, request)
 	})
 }
 
@@ -354,17 +349,21 @@ func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, 
 //
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetToolHeaders(headers http.Header, req *jsonrpc.Request, inputSchema json.RawMessage) error {
-	return setHeaders(headers, req, func() ([]HeaderArgument, error) { return schemaArguments(inputSchema, req.Params) })
+	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
+		return schemaArguments(inputSchema, call.Params["arguments"])
+	})
 }
 
-func setHeaders(headers http.Header, req *jsonrpc.Request, tool func() ([]HeaderArgument, error)) error {
-	var params map[string]json.RawMessage
-	_ = json.Unmarshal(req.Params, &params)
-	name, issue := requestName(req.Method, params)
+func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([]HeaderArgument, error)) error {
+	call := Request{Message: req}
+	_ = json.Unmarshal(req.Params, &call.Params)
+	_ = json.Unmarshal(call.Params["_meta"], &call.Meta)
+	name, issue := requestName(req.Method, call.Params)
 	if issue != nil {
 		return issue
 	}
-	arguments, err := tool()
+	call.Name, _ = name.value.(string)
+	arguments, err := tool(call)
 	if err != nil {
 		return err
 	}
