@@ -233,28 +233,45 @@ func TestLegacyCompatibility(t *testing.T) {
 	}
 }
 
-func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
+func TestLegacyServerAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		method string
 		status int
+		media  string
 		body   string
 		want   string
+		legacy bool
 	}{
+		{name: "TypeScript SDK rejection", status: 400, legacy: true, body: `{"jsonrpc":"2.0","error":{"code":-32000,"message":"Bad Request: Unsupported protocol version: 2026-07-28 (supported versions: 2025-11-25, 2025-06-18)"},"id":null}`},
+		{name: "Python SDK rejection", status: 400, legacy: true, body: `{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Bad Request: Missing session ID"}}`},
+		{name: "plain rejection", status: 400, legacy: true, media: "text/plain; charset=utf-8", body: "Bad Request: Unsupported protocol version"},
+		{name: "empty rejection", status: 400, legacy: true},
 		{name: "tool method not found", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
+		{name: "unknown tool", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool: profile"}}`},
 		{name: "discovery authentication", method: "server/discover", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
 		{
 			name: "legacy result", status: 200, body: `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`,
 			want: `{"jsonrpc":"2.0","id":1,"result":{"cacheScope":"private","content":[],"resultType":"complete","ttlMs":0}}`,
 		},
 		{name: "native discovery", method: "server/discover", status: 200, body: `{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"resources":{},"tools":{"listChanged":true}}}}`},
-		{name: "oversized ordinary error", status: 400, body: strings.Repeat("ordinary upstream error", mcp.DefaultMaxLineLength/10)},
+		{name: "oversized ordinary answer", status: 200, body: strings.Repeat("ordinary upstream answer", mcp.DefaultMaxLineLength/10)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var calls atomic.Int32
+			var calls, executions atomic.Int32
+			provider := legacyTestProvider("2025-06-18", func(w http.ResponseWriter, _ *http.Request, req *jsonrpc.Request) {
+				executions.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jsonrpc": "2.0", "id": req.ID.Raw(), "result": &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "legacy"}}},
+				})
+			})
 			transport, endpoint := legacyTestTransport(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Mcp-Protocol-Version") != proxy.CurrentVersion {
+					provider.ServeHTTP(w, r)
+					return
+				}
 				calls.Add(1)
-				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Type", cmp.Or(tc.media, "application/json"))
 				w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="https://provider.example/metadata"`)
 				w.Header().Set("Retry-After", "30")
 				w.WriteHeader(tc.status)
@@ -267,8 +284,16 @@ func TestFallbackRequiresExplicitProtocolRejection(t *testing.T) {
 			}
 			defer response.Body.Close()
 			body, err := io.ReadAll(response.Body)
-			if err != nil || response.StatusCode != tc.status || string(body) != cmp.Or(tc.want, tc.body) || calls.Load() != 1 || response.Header.Get("Retry-After") != "30" || response.Header.Get("WWW-Authenticate") != `Bearer resource_metadata="https://provider.example/metadata"` {
-				t.Fatalf("unexpected retry or response: %d, calls %d, error %v", response.StatusCode, calls.Load(), err)
+			if tc.legacy {
+				var reply struct{ Result mcp.CallToolResult }
+				if err != nil || response.StatusCode != 200 || json.Unmarshal(body, &reply) != nil || len(reply.Result.Content) != 1 ||
+					reply.Result.Content[0].(*mcp.TextContent).Text != "legacy" || calls.Load() != 1 || executions.Load() != 1 {
+					t.Fatalf("not asked once in a legacy session: %d %s, calls %d, executions %d, error %v", response.StatusCode, body, calls.Load(), executions.Load(), err)
+				}
+				return
+			}
+			if err != nil || response.StatusCode != tc.status || string(body) != cmp.Or(tc.want, tc.body) || calls.Load() != 1 || executions.Load() != 0 || response.Header.Get("Retry-After") != "30" || response.Header.Get("WWW-Authenticate") != `Bearer resource_metadata="https://provider.example/metadata"` {
+				t.Fatalf("unexpected retry or response: %d, calls %d, executions %d, error %v", response.StatusCode, calls.Load(), executions.Load(), err)
 			}
 		})
 	}
