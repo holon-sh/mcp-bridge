@@ -23,8 +23,8 @@ import (
 // NewRemoteTransport wraps base so current requests, which callers have checked
 // with [ParseRequest], can use legacy Streamable HTTP servers. A legacy
 // server's result gets the fields of a current result, and a tools/list,
-// tools/call or server/discover request the server refuses is retried in a
-// legacy session.
+// tools/call or server/discover request whose answer identifies a legacy
+// server is retried in a legacy session.
 func NewRemoteTransport(base http.RoundTripper) http.RoundTripper {
 	return legacyFallback{base: cmp.Or(base, http.DefaultTransport)}
 }
@@ -46,7 +46,7 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		return response, err
 	}
 	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusBadRequest || media != "application/json" {
+	if response.StatusCode != http.StatusBadRequest && (response.StatusCode != http.StatusOK || media != "application/json") {
 		return response, nil
 	}
 	originalBody := response.Body
@@ -60,18 +60,16 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
 	message, _ := jsonrpc.DecodeMessage(body)
-	reply, ok := message.(*jsonrpc.Response)
-	if !ok {
-		return response, nil
-	}
-	method := r.Header.Get(HeaderMethod)
-	if errors.Is(reply.Error, &jsonrpc.Error{Code: mcp.CodeUnsupportedProtocolVersion}) && slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) ||
-		method == MethodDiscover && errors.Is(reply.Error, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) {
+	reply, _ := message.(*jsonrpc.Response)
+	if method := r.Header.Get(HeaderMethod); slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
 		message, _ = jsonrpc.DecodeMessage(sent)
 		if request, ok := message.(*jsonrpc.Request); ok {
 			_ = originalBody.Close()
 			return t.legacy(r, request)
 		}
+	}
+	if reply == nil {
+		return response, nil
 	}
 	if result := translate.Result(reply.Result); result != nil {
 		reply.Result = result
@@ -81,6 +79,25 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		response.Header.Del("Content-Length")
 	}
 	return response, nil
+}
+
+// legacyAnswer reports whether a server's answer to a current request of
+// method, with status and reply, identifies a legacy server under [MCP backward
+// compatibility]: a 400 without an error a current server answers with 400, an
+// [UnsupportedProtocolVersionError], whose versions are legacy ones to the
+// bridge, or an unknown [server/discover], which every current server
+// implements.
+//
+// [MCP backward compatibility]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#backward-compatibility
+// [UnsupportedProtocolVersionError]: https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#protocol-version-negotiation
+// [server/discover]: https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#protocol-version-negotiation
+func legacyAnswer(method string, status int, reply *jsonrpc.Response) bool {
+	var code int64
+	if wire := (*jsonrpc.Error)(nil); reply != nil && errors.As(reply.Error, &wire) {
+		code = wire.Code
+	}
+	return status == http.StatusBadRequest && ErrorStatus(code) != http.StatusBadRequest ||
+		code == mcp.CodeUnsupportedProtocolVersion || method == MethodDiscover && code == jsonrpc.CodeMethodNotFound
 }
 
 func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http.Response, error) {

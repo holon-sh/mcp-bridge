@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
 	"slices"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -34,6 +35,26 @@ const (
 // than [CurrentVersion].
 func IsLegacyVersion(version string) bool {
 	return version < CurrentVersion && slices.Contains(mcp.SupportedProtocolVersions(), version)
+}
+
+// ErrorStatus returns the HTTP status a current server answers a request with
+// when it refuses it with code: 404 for an [unknown method], and 400 for a
+// [HeaderMismatch], an [UnsupportedProtocolVersionError], or a missing client
+// capability or invalid params under [request _meta]. It returns 0 for any other
+// code.
+//
+// [unknown method]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#protocol-version-header
+// [HeaderMismatch]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
+// [UnsupportedProtocolVersionError]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#protocol-version-header
+// [request _meta]: https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
+func ErrorStatus(code int64) int {
+	switch code {
+	case jsonrpc.CodeMethodNotFound:
+		return http.StatusNotFound
+	case mcp.CodeHeaderMismatch, mcp.CodeUnsupportedProtocolVersion, mcp.CodeMissingRequiredClientCapabilities, jsonrpc.CodeInvalidParams:
+		return http.StatusBadRequest
+	}
+	return 0
 }
 
 // UnsupportedVersion returns an MCP error identifying the rejected version
