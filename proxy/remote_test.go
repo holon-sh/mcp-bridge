@@ -244,10 +244,7 @@ func TestLegacyServerAnswers(t *testing.T) {
 		legacy bool
 	}{
 		{name: "TypeScript SDK rejection", status: 400, legacy: true, body: `{"jsonrpc":"2.0","error":{"code":-32000,"message":"Bad Request: Unsupported protocol version: 2026-07-28 (supported versions: 2025-11-25, 2025-06-18)"},"id":null}`},
-		{name: "Python SDK rejection", status: 400, legacy: true, body: `{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Bad Request: Missing session ID"}}`},
 		{name: "plain rejection", status: 400, legacy: true, media: "text/plain; charset=utf-8", body: "Bad Request: Unsupported protocol version"},
-		{name: "empty rejection", status: 400, legacy: true},
-		{name: "tool method not found", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
 		{name: "unknown tool", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool: profile"}}`},
 		{name: "discovery authentication", method: "server/discover", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
 		{

@@ -83,27 +83,21 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // legacyAnswer reports whether a server's answer to a current request of
 // method, with status and reply, identifies a legacy server under [MCP backward
-// compatibility]:
-//   - an [UnsupportedProtocolVersionError] asks for a version the server
-//     supports, which for the bridge is a legacy one;
-//   - every current server implements [server/discover];
-//   - a 400 is legacy unless its body is an error a current server sends:
-//     [HeaderMismatch], a missing client capability or invalid params under
-//     [request _meta], or method not found.
+// compatibility]: a 400 without an error a current server answers with 400, an
+// [UnsupportedProtocolVersionError], whose versions are legacy ones to the
+// bridge, or an unknown [server/discover], which every current server
+// implements.
 //
 // [MCP backward compatibility]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#backward-compatibility
 // [UnsupportedProtocolVersionError]: https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#protocol-version-negotiation
 // [server/discover]: https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning#protocol-version-negotiation
-// [HeaderMismatch]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
-// [request _meta]: https://modelcontextprotocol.io/specification/2026-07-28/basic/index#_meta
 func legacyAnswer(method string, status int, reply *jsonrpc.Response) bool {
 	var code int64
 	if wire := (*jsonrpc.Error)(nil); reply != nil && errors.As(reply.Error, &wire) {
 		code = wire.Code
 	}
-	current := []int64{mcp.CodeHeaderMismatch, mcp.CodeMissingRequiredClientCapabilities, jsonrpc.CodeInvalidParams, jsonrpc.CodeMethodNotFound}
-	return code == mcp.CodeUnsupportedProtocolVersion || method == MethodDiscover && code == jsonrpc.CodeMethodNotFound ||
-		status == http.StatusBadRequest && !slices.Contains(current, code)
+	return status == http.StatusBadRequest && ErrorStatus(code) != http.StatusBadRequest ||
+		code == mcp.CodeUnsupportedProtocolVersion || method == MethodDiscover && code == jsonrpc.CodeMethodNotFound
 }
 
 func (t legacyFallback) legacy(r *http.Request, request *jsonrpc.Request) (*http.Response, error) {

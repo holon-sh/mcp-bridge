@@ -2,6 +2,7 @@ package mcphttp
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -135,7 +136,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 			status := http.StatusOK
 			var wire *jsonrpc.Error
 			if errors.As(response.Error, &wire) {
-				status = errorStatus(wire.Code, status)
+				status = cmp.Or(proxy.ErrorStatus(wire.Code), status)
 			}
 			w.WriteHeader(status)
 			_, _ = w.Write(data)
@@ -193,16 +194,6 @@ func WriteError(w http.ResponseWriter, status int, id jsonrpc.ID, issue *jsonrpc
 	w.WriteHeader(status)
 	encoded, _ := jsonrpc.EncodeMessage(&jsonrpc.Response{ID: id, Error: issue})
 	_, _ = w.Write(encoded)
-}
-
-func errorStatus(code int64, fallback int) int {
-	switch code {
-	case jsonrpc.CodeMethodNotFound:
-		return http.StatusNotFound
-	case mcp.CodeHeaderMismatch, mcp.CodeUnsupportedProtocolVersion, jsonrpc.CodeInvalidParams:
-		return http.StatusBadRequest
-	}
-	return fallback
 }
 
 func writeHeaderError(w http.ResponseWriter, id jsonrpc.ID, err error) {

@@ -1,6 +1,7 @@
 package mcphttp
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -238,7 +239,7 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var rpcErr *jsonrpc.Error
 		if req, ok := msg.(*jsonrpc.Request); ok && errors.As(err, &rpcErr) {
-			WriteError(w, errorStatus(rpcErr.Code, http.StatusBadRequest), req.ID, rpcErr)
+			WriteError(w, cmp.Or(proxy.ErrorStatus(rpcErr.Code), http.StatusBadRequest), req.ID, rpcErr)
 			return
 		}
 		b.stop(err)
