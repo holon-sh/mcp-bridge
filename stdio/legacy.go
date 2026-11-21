@@ -56,24 +56,23 @@ func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downs
 				if r, ok := result.(interface{ NeedsInput() bool }); ok && r.NeedsInput() {
 					return nil, errors.New("MCP translation does not support input-required results")
 				}
-				switch r := result.(type) {
-				case *mcp.ListToolsResult:
-					for _, tool := range r.Tools {
-						if schema, _ := tool.OutputSchema.(map[string]any); schema["type"] != "object" {
-							tool.OutputSchema = nil
-						}
-					}
-				case *mcp.CallToolResult:
-					if _, ok := r.StructuredContent.(map[string]any); !ok {
-						r.StructuredContent = nil
-					}
-				}
 			}
 			return result, err
 		}
 	})
-	err := server.Run(ctx, connectionTransport{downstream})
+	err := server.Run(ctx, connectionTransport{legacyClient{downstream}})
 	return cmp.Or(context.Cause(ctx), err)
+}
+
+type legacyClient struct{ mcp.Connection }
+
+func (c legacyClient) Write(ctx context.Context, msg jsonrpc.Message) error {
+	if response, ok := msg.(*jsonrpc.Response); ok {
+		if result := translate.StructuredOutput(response.Result); result != nil {
+			response.Result = result
+		}
+	}
+	return c.Connection.Write(ctx, msg)
 }
 
 type connectionTransport struct{ mcp.Connection }
