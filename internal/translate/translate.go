@@ -27,10 +27,6 @@ func Result(result json.RawMessage) json.RawMessage {
 func StructuredOutput(result json.RawMessage) json.RawMessage {
 	fields := object(result)
 	changed := false
-	if content, ok := fields["structuredContent"]; ok && object(content) == nil {
-		delete(fields, "structuredContent")
-		changed = true
-	}
 	var tools []map[string]json.RawMessage
 	if json.Unmarshal(fields["tools"], &tools) == nil {
 		for _, tool := range tools {
@@ -39,7 +35,13 @@ func StructuredOutput(result json.RawMessage) json.RawMessage {
 				changed = true
 			}
 		}
-		fields["tools"], _ = json.Marshal(tools)
+		if changed {
+			fields["tools"], _ = json.Marshal(tools)
+		}
+	}
+	if content, ok := fields["structuredContent"]; ok && content[0] != '{' {
+		delete(fields, "structuredContent")
+		changed = true
 	}
 	if !changed {
 		return nil

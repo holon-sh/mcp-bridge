@@ -159,18 +159,18 @@ func (w *legacyResults) WriteHeader(status int) {
 
 func (w *legacyResults) Write(data []byte) (int, error) {
 	w.body = append(w.body, data...)
-	if !w.stream() {
+	if !w.stream() || bytes.IndexByte(data, '\n') < 0 {
 		return len(data), nil
 	}
-	var events []byte
-	start, end := 0, 0
+	var events, event []byte
 	for line := range bytes.Lines(w.body) {
-		if end += len(line); bytes.HasSuffix(line, []byte("\n")) && len(bytes.TrimRight(line, "\r\n")) == 0 {
-			events = append(events, w.legacy(w.body[start:end])...)
-			start = end
+		event = append(event, line...)
+		if bytes.HasSuffix(line, []byte("\n")) && len(bytes.TrimRight(line, "\r\n")) == 0 {
+			events = append(events, w.legacy(event)...)
+			event = nil
 		}
 	}
-	w.body = w.body[start:]
+	w.body = event
 	_, err := w.ResponseWriter.Write(events)
 	return len(data), err
 }
@@ -187,10 +187,11 @@ func (w *legacyResults) stream() bool {
 }
 
 func (w *legacyResults) legacy(message []byte) []byte {
-	reply, frame := decodeResponse(message), "%s"
+	decode, frame := decodeResponse, "%s"
 	if w.stream() {
-		reply, frame = streamReply(message), "data: %s\n\n"
+		decode, frame = streamReply, "data: %s\n\n"
 	}
+	reply := decode(message)
 	if reply == nil {
 		return message
 	}
