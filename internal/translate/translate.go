@@ -40,6 +40,10 @@ func StructuredOutput(result json.RawMessage) json.RawMessage {
 		}
 	}
 	if content, ok := fields["structuredContent"]; ok && content[0] != '{' {
+		var blocks []json.RawMessage
+		if _ = json.Unmarshal(fields["content"], &blocks); len(blocks) == 0 && string(content) != "null" {
+			fields["content"], _ = json.Marshal([]mcp.Content{&mcp.TextContent{Text: string(content)}})
+		}
 		delete(fields, "structuredContent")
 		changed = true
 	}
