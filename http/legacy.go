@@ -159,13 +159,13 @@ func (w *legacyResults) WriteHeader(status int) {
 
 func (w *legacyResults) Write(data []byte) (int, error) {
 	w.body = append(w.body, data...)
-	if !w.stream() || bytes.IndexByte(data, '\n') < 0 {
+	if !stream(w.Header()) || bytes.IndexByte(data, '\n') < 0 {
 		return len(data), nil
 	}
 	var events, event []byte
 	for line := range bytes.Lines(w.body) {
 		event = append(event, line...)
-		if bytes.HasSuffix(line, []byte("\n")) && len(bytes.TrimRight(line, "\r\n")) == 0 {
+		if string(bytes.TrimLeft(line, "\r")) == "\n" {
 			events = append(events, w.legacy(event)...)
 			event = nil
 		}
@@ -181,14 +181,14 @@ func (w *legacyResults) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *legacyResults) close() { _, _ = w.ResponseWriter.Write(w.legacy(w.body)) }
 
-func (w *legacyResults) stream() bool {
-	media, _, _ := mime.ParseMediaType(w.Header().Get("Content-Type"))
+func stream(header http.Header) bool {
+	media, _, _ := mime.ParseMediaType(header.Get("Content-Type"))
 	return media == "text/event-stream"
 }
 
 func (w *legacyResults) legacy(message []byte) []byte {
 	decode, frame := decodeResponse, "%s"
-	if w.stream() {
+	if stream(w.Header()) {
 		decode, frame = streamReply, "data: %s\n\n"
 	}
 	reply := decode(message)
@@ -247,7 +247,7 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 		return nil
 	}
 	body := response.Body.Bytes()
-	if media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type")); media != "text/event-stream" {
+	if !stream(response.Header()) {
 		return decodeResponse(body)
 	}
 	return streamReply(body)
