@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"mime"
@@ -27,7 +28,7 @@ import (
 //
 // Authentication must wrap this handler. A 2025 request body larger than
 // maxMessageBytes is rejected. Responses from next, including streams and
-// HTTP errors, reach the client unchanged.
+// HTTP errors, reach the client.
 //
 // 2025 clients cannot receive server-initiated requests or subscriptions, and
 // next does not see the capabilities they declare.
@@ -137,9 +138,69 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, re
 	case errors.Is(err, errAnswered):
 	case err != nil:
 		writeHeaderError(w, request.ID, err)
+	case request.Method == proxy.MethodListTools || request.Method == proxy.MethodCallTool:
+		results := &legacyResults{ResponseWriter: w}
+		next.ServeHTTP(results, r)
+		results.close()
 	default:
 		next.ServeHTTP(w, r)
 	}
+}
+
+type legacyResults struct {
+	http.ResponseWriter
+	body []byte
+}
+
+func (w *legacyResults) WriteHeader(status int) {
+	w.Header().Del("Content-Length")
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *legacyResults) Write(data []byte) (int, error) {
+	w.body = append(w.body, data...)
+	if !w.stream() {
+		return len(data), nil
+	}
+	var events []byte
+	start, end := 0, 0
+	for line := range bytes.Lines(w.body) {
+		if end += len(line); bytes.HasSuffix(line, []byte("\n")) && len(bytes.TrimRight(line, "\r\n")) == 0 {
+			events = append(events, w.legacy(w.body[start:end])...)
+			start = end
+		}
+	}
+	w.body = w.body[start:]
+	_, err := w.ResponseWriter.Write(events)
+	return len(data), err
+}
+
+func (w *legacyResults) Flush() { _ = http.NewResponseController(w.ResponseWriter).Flush() }
+
+func (w *legacyResults) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *legacyResults) close() { _, _ = w.ResponseWriter.Write(w.legacy(w.body)) }
+
+func (w *legacyResults) stream() bool {
+	media, _, _ := mime.ParseMediaType(w.Header().Get("Content-Type"))
+	return media == "text/event-stream"
+}
+
+func (w *legacyResults) legacy(message []byte) []byte {
+	reply, frame := decodeResponse(message), "%s"
+	if w.stream() {
+		reply, frame = streamReply(message), "data: %s\n\n"
+	}
+	if reply == nil {
+		return message
+	}
+	result := translate.StructuredOutput(reply.Result)
+	if result == nil {
+		return message
+	}
+	reply.Result = result
+	data, _ := jsonrpc.EncodeMessage(reply)
+	return fmt.Appendf(nil, frame, data)
 }
 
 var errAnswered = errors.New("answered by the current handler")
@@ -188,6 +249,10 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 	if media, _, _ := mime.ParseMediaType(response.Header().Get("Content-Type")); media != "text/event-stream" {
 		return decodeResponse(body)
 	}
+	return streamReply(body)
+}
+
+func streamReply(body []byte) *jsonrpc.Response {
 	// An [event's data] is its data fields joined by newlines.
 	//
 	// [event's data]: https://html.spec.whatwg.org/multipage/server-sent-events.html#dispatchMessage

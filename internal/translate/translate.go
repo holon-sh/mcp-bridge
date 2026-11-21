@@ -24,6 +24,36 @@ func Result(result json.RawMessage) json.RawMessage {
 	return current
 }
 
+func StructuredOutput(result json.RawMessage) json.RawMessage {
+	fields := object(result)
+	changed := false
+	if content, ok := fields["structuredContent"]; ok && object(content) == nil {
+		delete(fields, "structuredContent")
+		changed = true
+	}
+	var tools []map[string]json.RawMessage
+	if json.Unmarshal(fields["tools"], &tools) == nil {
+		for _, tool := range tools {
+			if schema, ok := tool["outputSchema"]; ok && string(object(schema)["type"]) != `"object"` {
+				delete(tool, "outputSchema")
+				changed = true
+			}
+		}
+		fields["tools"], _ = json.Marshal(tools)
+	}
+	if !changed {
+		return nil
+	}
+	legacy, _ := json.Marshal(fields)
+	return legacy
+}
+
+func object(value json.RawMessage) map[string]json.RawMessage {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(value, &fields)
+	return fields
+}
+
 const appExtension = "io.modelcontextprotocol/ui"
 
 // AppExtension keeps only the MCP Apps extension, which works through plain
