@@ -2,22 +2,47 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to tag main as and release, such as v1.2.3
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.version || github.ref }}
   cancel-in-progress: false
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
-  release:
+  tag:
+    if: github.event_name == 'workflow_dispatch'
     needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag main
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "Releases are tagged from main."; exit 1; }
+          printf '%s\n' "$VERSION" | grep -Eq '^v[01]\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "$VERSION is not a v0 or v1 version like v1.2.3, the versions this module path can carry."; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then echo "$VERSION is already released."; exit 1; fi
+          git push origin "HEAD:refs/tags/$VERSION"
+  release:
+    needs: [checks, tag]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.version) || '' }}
           fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
@@ -28,3 +53,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.version || github.ref_name }}
