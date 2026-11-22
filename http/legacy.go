@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -26,13 +25,22 @@ import (
 // each of their requests as a current request with the same credentials.
 // Current requests reach next unchanged.
 //
+// tool returns the input schema of the tool that a 2025 tools/call names. It
+// receives r, the current request next then receives, with its method and name
+// headers set, and call, the parsed request. The schema is read only for the
+// call's [x-mcp-header] arguments, which are sent as headers; a nil schema sends
+// none, and next answers the call either way. An error from tool answers the
+// call instead of next.
+//
 // Authentication must wrap this handler. A 2025 request body larger than
 // maxMessageBytes is rejected. Responses from next, including streams and
 // HTTP errors, reach the client.
 //
 // 2025 clients cannot receive server-initiated requests or subscriptions, and
 // next does not see the capabilities they declare.
-func WithLegacyClients(next http.Handler, maxMessageBytes int64) http.Handler {
+//
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+func WithLegacyClients(next http.Handler, maxMessageBytes int64, tool func(r *http.Request, call proxy.Request) (json.RawMessage, error)) http.Handler {
 	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
 	origins := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +71,7 @@ func WithLegacyClients(next http.Handler, maxMessageBytes int64) http.Handler {
 		case "initialize":
 			initializeLegacy(w, r, next, request)
 		default:
-			forwardLegacy(w, r, next, request)
+			forwardLegacy(w, r, next, tool, request)
 		}
 	})
 }
@@ -76,8 +84,8 @@ func legacyLifecycle(server *mcp.Server) http.Handler {
 
 func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(proxy.CurrentVersion)})
-	result, err := query(w, r, next, request.ID, proxy.MethodDiscover, params)
-	if err != nil {
+	result, ok := query(w, r, next, request.ID, proxy.MethodDiscover, params)
+	if !ok {
 		return
 	}
 	var discovered struct {
@@ -118,7 +126,7 @@ func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler,
 
 const eventsExtension = "io.modelcontextprotocol/events"
 
-func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
+func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, tool func(*http.Request, proxy.Request) (json.RawMessage, error), request *jsonrpc.Request) {
 	params := map[string]json.RawMessage{}
 	var meta map[string]json.RawMessage
 	if _ = json.Unmarshal(request.Params, &params); params == nil {
@@ -131,11 +139,16 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, re
 	params["_meta"], _ = json.Marshal(meta)
 	request.Params, _ = json.Marshal(params)
 	r = currentRequest(r.Context(), r, request)
-	err := proxy.SetHeaders(r.Context(), r.Header, request, func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
-		return query(w, r.WithContext(ctx), next, request.ID, method, params)
-	})
+	err := proxy.SetToolHeaders(r.Header, request, nil)
+	if err == nil && request.Method == proxy.MethodCallTool {
+		call := proxy.Request{Message: request, Params: params, Meta: meta}
+		_ = json.Unmarshal(params["name"], &call.Name)
+		var schema json.RawMessage
+		if schema, err = tool(r, call); err == nil {
+			err = proxy.SetToolHeaders(r.Header, request, schema)
+		}
+	}
 	switch {
-	case errors.Is(err, errAnswered):
 	case err != nil:
 		writeHeaderError(w, request.ID, err)
 	case request.Method == proxy.MethodListTools || request.Method == proxy.MethodCallTool:
@@ -204,21 +217,19 @@ func (w *legacyResults) legacy(message []byte) []byte {
 	return fmt.Appendf(nil, frame, data)
 }
 
-var errAnswered = errors.New("answered by the current handler")
-
-func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id jsonrpc.ID, method string, params json.RawMessage) (json.RawMessage, error) {
+func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id jsonrpc.ID, method string, params json.RawMessage) (json.RawMessage, bool) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, currentRequest(r.Context(), r, &jsonrpc.Request{ID: id, Method: method, Params: params}))
 	reply := recordedReply(response)
 	switch {
 	case reply != nil && reply.Error == nil:
-		return reply.Result, nil
+		return reply.Result, true
 	case reply == nil && response.Code == http.StatusOK:
 		WriteError(w, 502, id, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid " + method + " reply"})
 	default:
 		copyResponse(w, response)
 	}
-	return nil, errAnswered
+	return nil, false
 }
 
 func copyResponse(w http.ResponseWriter, response *httptest.ResponseRecorder) {
