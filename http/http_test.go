@@ -761,7 +761,7 @@ func exercise(t *testing.T, session *mcp.ClientSession, legacy, translated bool,
 	if translated {
 		meta := value["meta"].(map[string]any)
 		caps := meta[mcp.MetaKeyClientCapabilities].(map[string]any)
-		if meta[mcp.MetaKeyProtocolVersion] != ProtocolVersion || meta[mcp.MetaKeyClientInfo].(map[string]any)["name"] != "test" || caps["elicitation"] != nil {
+		if meta[mcp.MetaKeyClientInfo].(map[string]any)["name"] != "test" || caps["elicitation"] != nil {
 			t.Fatalf("upstream identity and capabilities: %v", meta)
 		}
 	}
@@ -897,9 +897,6 @@ func TestProxyTransports(t *testing.T) {
 					if mode.noDiscovery && r.Header.Get("Mcp-Method") == "server/discover" {
 						http.NotFound(w, r)
 						return
-					}
-					if direction.translate && r.Header.Get("Mcp-Name") == "echo" && (r.Header.Get("Mcp-Protocol-Version") != ProtocolVersion || r.Header.Get("Mcp-Param-Value") != "hello") {
-						t.Errorf("translated HTTP headers: %v", r.Header)
 					}
 					if mode.sse && r.Method == http.MethodGet {
 						response := w

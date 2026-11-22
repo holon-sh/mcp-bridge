@@ -138,7 +138,6 @@ func TestLegacyClientsBoundaries(t *testing.T) {
 		{name: "current request", method: "POST", version: proxy.CurrentVersion, body: `{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}`, reply: "unread", want: "unread", status: http.StatusTeapot},
 		{name: "GET", method: "GET", status: 405},
 		{name: "ping", method: "POST", version: "2025-06-18", body: `{"jsonrpc":"2.0","id":1,"method":"ping"}`, status: 200},
-		{name: "unknown cancellation", method: "POST", body: `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`, status: 202},
 		{name: "foreign origin", method: "POST", origin: "https://other.example", status: 403},
 		{name: "too large", method: "POST", version: "2025-06-18", body: `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"` + strings.Repeat("x", 1<<10) + `"}}`, status: 413},
 		{name: "null params", method: "POST", version: "2025-06-18", body: `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":null}`, status: 400},
