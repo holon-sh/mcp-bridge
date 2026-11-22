@@ -97,7 +97,7 @@ func TestLegacyClientsEvents(t *testing.T) {
 			close(cancelled)
 		}
 	})
-	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, proxy.MaxMessageBytes, nil))
+	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, proxy.MaxMessageBytes, func(*http.Request, proxy.Request) (json.RawMessage, error) { return nil, nil }))
 	defer bridge.Close()
 	post := func(ctx context.Context, body string) *http.Response {
 		r, _ := http.NewRequestWithContext(ctx, "POST", bridge.URL, strings.NewReader(body))

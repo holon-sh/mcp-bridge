@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -85,8 +84,8 @@ func legacyLifecycle(server *mcp.Server) http.Handler {
 
 func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
 	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(proxy.CurrentVersion)})
-	result, err := query(w, r, next, request.ID, proxy.MethodDiscover, params)
-	if err != nil {
+	result, ok := query(w, r, next, request.ID, proxy.MethodDiscover, params)
+	if !ok {
 		return
 	}
 	var discovered struct {
@@ -218,21 +217,19 @@ func (w *legacyResults) legacy(message []byte) []byte {
 	return fmt.Appendf(nil, frame, data)
 }
 
-var errAnswered = errors.New("answered by the current handler")
-
-func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id jsonrpc.ID, method string, params json.RawMessage) (json.RawMessage, error) {
+func query(w http.ResponseWriter, r *http.Request, handler http.Handler, id jsonrpc.ID, method string, params json.RawMessage) (json.RawMessage, bool) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, currentRequest(r.Context(), r, &jsonrpc.Request{ID: id, Method: method, Params: params}))
 	reply := recordedReply(response)
 	switch {
 	case reply != nil && reply.Error == nil:
-		return reply.Result, nil
+		return reply.Result, true
 	case reply == nil && response.Code == http.StatusOK:
 		WriteError(w, 502, id, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid " + method + " reply"})
 	default:
 		copyResponse(w, response)
 	}
-	return nil, errAnswered
+	return nil, false
 }
 
 func copyResponse(w http.ResponseWriter, response *httptest.ResponseRecorder) {
