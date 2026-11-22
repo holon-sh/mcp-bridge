@@ -73,9 +73,6 @@ func ToolHeaderArguments(ctx context.Context, call Request, request func(context
 }
 
 func schemaArguments(inputSchema, rawArguments json.RawMessage) ([]HeaderArgument, error) {
-	if inputSchema == nil {
-		return nil, nil
-	}
 	var schema headerProperty
 	if err := json.Unmarshal(inputSchema, &schema); err != nil {
 		return nil, err
@@ -351,6 +348,9 @@ func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, 
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetToolHeaders(headers http.Header, req *jsonrpc.Request, inputSchema json.RawMessage) error {
 	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
+		if inputSchema == nil {
+			return nil, nil
+		}
 		return schemaArguments(inputSchema, call.Params["arguments"])
 	})
 }
