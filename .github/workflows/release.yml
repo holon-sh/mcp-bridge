@@ -32,8 +32,7 @@ jobs:
           [ "$GITHUB_REF" = refs/heads/main ] || { echo "Releases are tagged from main."; exit 1; }
           printf '%s\n' "$VERSION" | grep -Eq '^v[01]\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "$VERSION is not a v0 or v1 version like v1.2.3, the versions this module path can carry."; exit 1; }
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null; then echo "$VERSION is already released."; exit 1; fi
-          git tag "$VERSION"
-          git push origin "refs/tags/$VERSION"
+          git push origin "HEAD:refs/tags/$VERSION"
   release:
     needs: [checks, tag]
     if: ${{ !failure() && !cancelled() }}
