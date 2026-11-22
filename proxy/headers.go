@@ -74,7 +74,7 @@ func ToolHeaderArguments(ctx context.Context, call Request, request func(context
 
 func schemaArguments(inputSchema, rawArguments json.RawMessage) ([]HeaderArgument, error) {
 	var schema headerProperty
-	if err := json.Unmarshal(inputSchema, &schema); err != nil {
+	if err := json.Unmarshal(inputSchema, &schema); inputSchema != nil && err != nil {
 		return nil, err
 	}
 	var arguments map[string]any

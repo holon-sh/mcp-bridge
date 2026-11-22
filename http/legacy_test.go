@@ -39,7 +39,7 @@ func TestLegacyClients(t *testing.T) {
 		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "ui://board/view.html", Text: "<html></html>"}}}, nil
 	})
 	current := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
-	bridge := httptest.NewServer(mcphttp.WithLegacyClients(current, proxy.MaxMessageBytes))
+	bridge := httptest.NewServer(mcphttp.WithLegacyClients(current, proxy.MaxMessageBytes, func(*http.Request, string) (json.RawMessage, error) { return schema, nil }))
 	defer bridge.Close()
 	for _, version := range []string{"2025-03-26", "2025-06-18", "2025-11-25"} {
 		t.Run(version, func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestLegacyClientsEvents(t *testing.T) {
 			close(cancelled)
 		}
 	})
-	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, proxy.MaxMessageBytes))
+	bridge := httptest.NewServer(mcphttp.WithLegacyClients(upstream, proxy.MaxMessageBytes, nil))
 	defer bridge.Close()
 	post := func(ctx context.Context, body string) *http.Response {
 		r, _ := http.NewRequestWithContext(ctx, "POST", bridge.URL, strings.NewReader(body))
@@ -141,9 +141,8 @@ func TestLegacyClientsBoundaries(t *testing.T) {
 		{name: "foreign origin", method: "POST", origin: "https://other.example", status: 403},
 		{name: "too large", method: "POST", version: "2025-06-18", body: `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"` + strings.Repeat("x", 1<<10) + `"}}`, status: 413},
 		{name: "null params", method: "POST", version: "2025-06-18", body: `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":null}`, status: 400},
-		{name: "catalog authorization challenge", method: "POST", version: "2025-06-18", body: call, upstream: 401, challenge: `Bearer resource_metadata="https://example.test/metadata"`, reply: `{"error":"login required"}`, want: `{"error":"login required"}`, status: 401},
-		{name: "invalid catalog", method: "POST", version: "2025-06-18", body: call, upstream: 200, reply: `{"jsonrpc":"2.0","id":1,"result":{}}`, status: 502},
-		{name: "catalog JSON-RPC error", method: "POST", version: "2025-06-18", body: call, upstream: 200, reply: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"session inactive","data":{"retry":false}}}`, want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"session inactive","data":{"retry":false}}}`, status: 200},
+		{name: "authorization challenge", method: "POST", version: "2025-06-18", body: call, upstream: 401, challenge: `Bearer resource_metadata="https://example.test/metadata"`, reply: `{"error":"login required"}`, want: `{"error":"login required"}`, status: 401},
+		{name: "JSON-RPC error", method: "POST", version: "2025-06-18", body: call, upstream: 200, reply: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"session inactive","data":{"retry":false}}}`, want: `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"session inactive","data":{"retry":false}}}`, status: 200},
 		{name: "unreadable discovery", method: "POST", body: initialize, upstream: 200, contentType: "text/event-stream", reply: "event: message\n\n", status: 502},
 		{name: "discovery split across data fields", method: "POST", body: initialize, upstream: 200, contentType: "text/event-stream",
 			reply: "event: message\ndata: {\"jsonrpc\":\"2.0\",\ndata: \"id\":1,\"result\":{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}}\n\n", status: 200},
@@ -155,7 +154,7 @@ func TestLegacyClientsBoundaries(t *testing.T) {
 				w.WriteHeader(cmp.Or(tc.upstream, http.StatusTeapot))
 				io.WriteString(w, tc.reply)
 			})
-			handler := mcphttp.WithLegacyClients(upstream, 1<<10)
+			handler := mcphttp.WithLegacyClients(upstream, 1<<10, func(*http.Request, string) (json.RawMessage, error) { return nil, nil })
 			r := httptest.NewRequest(tc.method, "https://example.test/mcp", strings.NewReader(tc.body))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Accept", "application/json, text/event-stream")
