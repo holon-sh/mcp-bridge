@@ -26,10 +26,12 @@ import (
 // each of their requests as a current request with the same credentials.
 // Current requests reach next unchanged.
 //
-// tool returns the input schema of the tool that a 2025 tools/call names, as
-// next serves it to r, the current request next then receives, or nil if next
-// has no such tool. The call's [x-mcp-header] arguments are sent as headers
-// from that schema.
+// tool returns the input schema of the tool that a 2025 tools/call names. It
+// receives r, the current request next then receives, with its method and name
+// headers set, and call, the parsed request. The schema is read only for the
+// call's [x-mcp-header] arguments, which are sent as headers; a nil schema sends
+// none, and next answers the call either way. An error from tool answers the
+// call instead of next.
 //
 // Authentication must wrap this handler. A 2025 request body larger than
 // maxMessageBytes is rejected. Responses from next, including streams and
@@ -39,7 +41,7 @@ import (
 // next does not see the capabilities they declare.
 //
 // [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
-func WithLegacyClients(next http.Handler, maxMessageBytes int64, tool func(r *http.Request, name string) (json.RawMessage, error)) http.Handler {
+func WithLegacyClients(next http.Handler, maxMessageBytes int64, tool func(r *http.Request, call proxy.Request) (json.RawMessage, error)) http.Handler {
 	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
 	origins := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +127,7 @@ func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler,
 
 const eventsExtension = "io.modelcontextprotocol/events"
 
-func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, tool func(*http.Request, string) (json.RawMessage, error), request *jsonrpc.Request) {
+func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, tool func(*http.Request, proxy.Request) (json.RawMessage, error), request *jsonrpc.Request) {
 	params := map[string]json.RawMessage{}
 	var meta map[string]json.RawMessage
 	if _ = json.Unmarshal(request.Params, &params); params == nil {
@@ -138,15 +140,14 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, to
 	params["_meta"], _ = json.Marshal(meta)
 	request.Params, _ = json.Marshal(params)
 	r = currentRequest(r.Context(), r, request)
-	var schema json.RawMessage
-	var err error
-	if request.Method == proxy.MethodCallTool {
-		var name string
-		_ = json.Unmarshal(params["name"], &name)
-		schema, err = tool(r, name)
-	}
-	if err == nil {
-		err = proxy.SetToolHeaders(r.Header, request, schema)
+	err := proxy.SetToolHeaders(r.Header, request, nil)
+	if err == nil && request.Method == proxy.MethodCallTool {
+		call := proxy.Request{Message: request, Params: params, Meta: meta}
+		_ = json.Unmarshal(params["name"], &call.Name)
+		var schema json.RawMessage
+		if schema, err = tool(r, call); err == nil {
+			err = proxy.SetToolHeaders(r.Header, request, schema)
+		}
 	}
 	switch {
 	case err != nil:
