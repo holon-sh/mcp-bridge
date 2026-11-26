@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"encoding/json"
@@ -53,27 +52,23 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		return response, nil
 	}
 	originalBody := response.Body
-	limited := bufio.NewReader(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1))
-	var body, data []byte
+	var read bytes.Buffer
+	answer := io.TeeReader(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1), &read)
+	var message jsonrpc.Message
 	if stream {
-		for message := jsonrpc.Message(nil); message == nil && err == nil; message, _ = jsonrpc.DecodeMessage(data) {
-			var read []byte
-			read, data, err = remote.NextEvent(limited)
-			body = append(body, read...)
+		for message = range remote.Messages(answer) {
+			break
 		}
-	} else {
-		body, err = io.ReadAll(limited)
-		data = body
-	}
-	if err != nil && !errors.Is(err, io.EOF) {
+	} else if body, err := io.ReadAll(answer); err != nil {
 		_ = originalBody.Close()
 		return nil, err
+	} else {
+		message, _ = jsonrpc.DecodeMessage(body)
 	}
 	response.Body = struct {
 		io.Reader
 		io.Closer
-	}{io.MultiReader(bytes.NewReader(body), limited, originalBody), originalBody}
-	message, _ := jsonrpc.DecodeMessage(data)
+	}{io.MultiReader(bytes.NewReader(read.Bytes()), originalBody), originalBody}
 	reply, _ := message.(*jsonrpc.Response)
 	if slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
 		message, _ = jsonrpc.DecodeMessage(sent)
@@ -87,7 +82,7 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	if result := translate.Result(reply.Result); result != nil {
 		reply.Result = result
-		body, _ = jsonrpc.EncodeMessage(reply)
+		body, _ := jsonrpc.EncodeMessage(reply)
 		_ = originalBody.Close()
 		response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 		response.Header.Del("Content-Length")

@@ -1,7 +1,6 @@
 package mcphttp
 
 import (
-	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -267,13 +266,12 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 }
 
 func streamReply(body []byte) *jsonrpc.Response {
-	events := bufio.NewReader(bytes.NewReader(body))
-	for {
-		_, data, err := remote.NextEvent(events)
-		if reply := decodeResponse(data); reply != nil || err != nil {
+	for message := range remote.Messages(bytes.NewReader(body)) {
+		if reply, ok := message.(*jsonrpc.Response); ok {
 			return reply
 		}
 	}
+	return nil
 }
 
 func decodeResponse(data []byte) *jsonrpc.Response {
