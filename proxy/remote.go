@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"encoding/json"
@@ -46,29 +47,42 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		return response, err
 	}
 	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if response.StatusCode != http.StatusBadRequest && (response.StatusCode != http.StatusOK || media != "application/json") {
+	method := r.Header.Get(HeaderMethod)
+	stream := method == MethodDiscover && response.StatusCode == http.StatusOK && media == "text/event-stream"
+	if !stream && response.StatusCode != http.StatusBadRequest && (response.StatusCode != http.StatusOK || media != "application/json") {
 		return response, nil
 	}
 	originalBody := response.Body
-	body, err := io.ReadAll(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1))
-	if err != nil {
+	limited := bufio.NewReader(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1))
+	var body, data []byte
+	if stream {
+		for message := jsonrpc.Message(nil); message == nil && err == nil; message, _ = jsonrpc.DecodeMessage(data) {
+			var read []byte
+			read, data, err = remote.NextEvent(limited)
+			body = append(body, read...)
+		}
+	} else {
+		body, err = io.ReadAll(limited)
+		data = body
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
 		_ = originalBody.Close()
 		return nil, err
 	}
 	response.Body = struct {
 		io.Reader
 		io.Closer
-	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
-	message, _ := jsonrpc.DecodeMessage(body)
+	}{io.MultiReader(bytes.NewReader(body), limited, originalBody), originalBody}
+	message, _ := jsonrpc.DecodeMessage(data)
 	reply, _ := message.(*jsonrpc.Response)
-	if method := r.Header.Get(HeaderMethod); slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
+	if slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
 		message, _ = jsonrpc.DecodeMessage(sent)
 		if request, ok := message.(*jsonrpc.Request); ok {
 			_ = originalBody.Close()
 			return t.legacy(r, request)
 		}
 	}
-	if reply == nil {
+	if reply == nil || stream {
 		return response, nil
 	}
 	if result := translate.Result(reply.Result); result != nil {

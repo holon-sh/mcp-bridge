@@ -1,6 +1,7 @@
 package mcphttp
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/holon-sh/mcp-bridge/internal/remote"
 	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/holon-sh/mcp-bridge/proxy"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -265,21 +267,13 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 }
 
 func streamReply(body []byte) *jsonrpc.Response {
-	// An [event's data] is its data fields joined by newlines.
-	//
-	// [event's data]: https://html.spec.whatwg.org/multipage/server-sent-events.html#dispatchMessage
-	var data []byte
-	for line := range bytes.Lines(body) {
-		if line = bytes.TrimRight(line, "\r\n"); len(line) == 0 {
-			if reply := decodeResponse(data); reply != nil {
-				return reply
-			}
-			data = nil
-		} else if value, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			data = append(append(data, bytes.TrimPrefix(value, []byte(" "))...), '\n')
+	events := bufio.NewReader(bytes.NewReader(body))
+	for {
+		_, data, err := remote.NextEvent(events)
+		if reply := decodeResponse(data); reply != nil || err != nil {
+			return reply
 		}
 	}
-	return decodeResponse(data)
 }
 
 func decodeResponse(data []byte) *jsonrpc.Response {
