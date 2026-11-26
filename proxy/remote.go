@@ -46,34 +46,41 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 		return response, err
 	}
 	media, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if response.StatusCode != http.StatusBadRequest && (response.StatusCode != http.StatusOK || media != "application/json") {
+	method := r.Header.Get(HeaderMethod)
+	stream := method == MethodDiscover && response.StatusCode == http.StatusOK && media == "text/event-stream"
+	if !stream && response.StatusCode != http.StatusBadRequest && (response.StatusCode != http.StatusOK || media != "application/json") {
 		return response, nil
 	}
 	originalBody := response.Body
-	body, err := io.ReadAll(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1))
-	if err != nil {
+	var read bytes.Buffer
+	answer := io.TeeReader(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1), &read)
+	var reply *jsonrpc.Response
+	if stream {
+		reply = remote.Reply(answer)
+	} else if body, err := io.ReadAll(answer); err != nil {
 		_ = originalBody.Close()
 		return nil, err
+	} else {
+		message, _ := jsonrpc.DecodeMessage(body)
+		reply, _ = message.(*jsonrpc.Response)
 	}
 	response.Body = struct {
 		io.Reader
 		io.Closer
-	}{io.MultiReader(bytes.NewReader(body), originalBody), originalBody}
-	message, _ := jsonrpc.DecodeMessage(body)
-	reply, _ := message.(*jsonrpc.Response)
-	if method := r.Header.Get(HeaderMethod); slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
-		message, _ = jsonrpc.DecodeMessage(sent)
+	}{io.MultiReader(bytes.NewReader(read.Bytes()), originalBody), originalBody}
+	if slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
+		message, _ := jsonrpc.DecodeMessage(sent)
 		if request, ok := message.(*jsonrpc.Request); ok {
 			_ = originalBody.Close()
 			return t.legacy(r, request)
 		}
 	}
-	if reply == nil {
+	if reply == nil || stream {
 		return response, nil
 	}
 	if result := translate.Result(reply.Result); result != nil {
 		reply.Result = result
-		body, _ = jsonrpc.EncodeMessage(reply)
+		body, _ := jsonrpc.EncodeMessage(reply)
 		_ = originalBody.Close()
 		response.Body, response.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 		response.Header.Del("Content-Length")

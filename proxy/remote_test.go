@@ -18,7 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"testing/iotest"
 
 	mcphttp "github.com/holon-sh/mcp-bridge/http"
 	"github.com/holon-sh/mcp-bridge/internal/remote"
@@ -29,16 +28,29 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
 func TestNativeDiscoveryStreams(t *testing.T) {
-	upstream := &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": {"text/event-stream; charset=utf-8"}},
-		Body:       io.NopCloser(iotest.ErrReader(errors.New("stream must not be buffered"))),
-	}
-	transport := proxy.NewRemoteTransport(remote.RoundTripFunc(func(*http.Request) (*http.Response, error) { return upstream, nil }))
+	const events = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"supportedVersions\":[\"2026-07-28\"]}}\n\n"
+	var buffered atomic.Bool
+	transport := proxy.NewRemoteTransport(remote.RoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream; charset=utf-8"}},
+			Body: io.NopCloser(io.MultiReader(strings.NewReader(events), readerFunc(func([]byte) (int, error) {
+				buffered.Store(true)
+				return 0, io.EOF
+			}))),
+		}, nil
+	}))
 	response, err := transport.RoundTrip(legacyRequest(t, "https://example.com", "server/discover", "alice"))
-	if err != nil || response != upstream {
-		t.Fatalf("stream was not passed through: %v", err)
+	if err != nil || buffered.Load() {
+		t.Fatalf("stream was buffered: %v", err)
+	}
+	if body, err := io.ReadAll(response.Body); string(body) != events || err != nil {
+		t.Fatalf("stream was not passed through: %q, %v", body, err)
 	}
 }
 
@@ -245,6 +257,11 @@ func TestLegacyServerAnswers(t *testing.T) {
 	}{
 		{name: "TypeScript SDK rejection", status: 400, legacy: true, body: `{"jsonrpc":"2.0","error":{"code":-32000,"message":"Bad Request: Unsupported protocol version: 2026-07-28 (supported versions: 2025-11-25, 2025-06-18)"},"id":null}`},
 		{name: "plain rejection", status: 400, legacy: true, media: "text/plain; charset=utf-8", body: "Bad Request: Unsupported protocol version"},
+		{
+			name: "streamed discovery rejection", method: "server/discover", status: 200, legacy: true, media: "text/event-stream",
+			body: "id: 0\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"starting\"}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"server/discover\"}}\n\n",
+			want: `{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"legacy","version":"1"}},"resultType":"complete","cacheScope":"private","ttlMs":0}}`,
+		},
 		{name: "unknown tool", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool: profile"}}`},
 		{name: "discovery authentication", method: "server/discover", status: 401, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`},
 		{
@@ -282,9 +299,10 @@ func TestLegacyServerAnswers(t *testing.T) {
 			defer response.Body.Close()
 			body, err := io.ReadAll(response.Body)
 			if tc.legacy {
-				var reply struct{ Result mcp.CallToolResult }
-				if err != nil || response.StatusCode != 200 || json.Unmarshal(body, &reply) != nil || len(reply.Result.Content) != 1 ||
-					reply.Result.Content[0].(*mcp.TextContent).Text != "legacy" || calls.Load() != 1 || executions.Load() != 1 {
+				var got, want any
+				_ = json.Unmarshal(body, &got)
+				_ = json.Unmarshal([]byte(cmp.Or(tc.want, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"legacy"}],"resultType":"complete","cacheScope":"private","ttlMs":0}}`)), &want)
+				if err != nil || response.StatusCode != 200 || !reflect.DeepEqual(got, want) || calls.Load() != 1 || executions.Load() > 1 {
 					t.Fatalf("not asked once in a legacy session: %d %s, calls %d, executions %d, error %v", response.StatusCode, body, calls.Load(), executions.Load(), err)
 				}
 				return
