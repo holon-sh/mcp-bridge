@@ -150,7 +150,7 @@ For clients using an `mcpServers` configuration:
 ## Go API
 
 ```sh
-go get github.com/holon-sh/mcp-bridge@v0.0.14
+go get github.com/holon-sh/mcp-bridge@v0.0.15
 ```
 
 This repository provides these Go packages:
