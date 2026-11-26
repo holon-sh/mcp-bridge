@@ -54,24 +54,22 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	originalBody := response.Body
 	var read bytes.Buffer
 	answer := io.TeeReader(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1), &read)
-	var message jsonrpc.Message
+	var reply *jsonrpc.Response
 	if stream {
-		for message = range remote.Messages(answer) {
-			break
-		}
+		reply = remote.Reply(answer)
 	} else if body, err := io.ReadAll(answer); err != nil {
 		_ = originalBody.Close()
 		return nil, err
 	} else {
-		message, _ = jsonrpc.DecodeMessage(body)
+		message, _ := jsonrpc.DecodeMessage(body)
+		reply, _ = message.(*jsonrpc.Response)
 	}
 	response.Body = struct {
 		io.Reader
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(read.Bytes()), originalBody), originalBody}
-	reply, _ := message.(*jsonrpc.Response)
 	if slices.Contains([]string{MethodDiscover, MethodListTools, MethodCallTool}, method) && legacyAnswer(method, response.StatusCode, reply) {
-		message, _ = jsonrpc.DecodeMessage(sent)
+		message, _ := jsonrpc.DecodeMessage(sent)
 		if request, ok := message.(*jsonrpc.Request); ok {
 			_ = originalBody.Close()
 			return t.legacy(r, request)

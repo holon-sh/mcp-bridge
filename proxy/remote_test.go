@@ -259,7 +259,7 @@ func TestLegacyServerAnswers(t *testing.T) {
 		{name: "plain rejection", status: 400, legacy: true, media: "text/plain; charset=utf-8", body: "Bad Request: Unsupported protocol version"},
 		{
 			name: "streamed discovery rejection", method: "server/discover", status: 200, legacy: true, media: "text/event-stream",
-			body: "id: 0\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"server/discover\"}}\n\n",
+			body: "id: 0\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"starting\"}}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"server/discover\"}}\n\n",
 			want: `{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"legacy","version":"1"}},"resultType":"complete","cacheScope":"private","ttlMs":0}}`,
 		},
 		{name: "unknown tool", status: 400, body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Unknown tool: profile"}}`},

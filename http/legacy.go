@@ -266,12 +266,7 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 }
 
 func streamReply(body []byte) *jsonrpc.Response {
-	for message := range remote.Messages(bytes.NewReader(body)) {
-		if reply, ok := message.(*jsonrpc.Response); ok {
-			return reply
-		}
-	}
-	return nil
+	return remote.Reply(bytes.NewReader(body))
 }
 
 func decodeResponse(data []byte) *jsonrpc.Response {
