@@ -3,11 +3,11 @@ package testutil
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/holon-sh/mcp-bridge/proxy"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
 func Request(t *testing.T, method string, params map[string]any) *http.Request {
@@ -23,14 +23,16 @@ func Request(t *testing.T, method string, params map[string]any) *http.Request {
 	meta["io.modelcontextprotocol/protocolVersion"] = proxy.CurrentVersion
 	meta["io.modelcontextprotocol/clientInfo"] = map[string]any{"name": "test", "version": "1"}
 	meta["io.modelcontextprotocol/clientCapabilities"] = map[string]any{"extensions": map[string]any{"io.modelcontextprotocol/tasks": map[string]any{}}}
-	raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+	id, _ := jsonrpc.MakeID(float64(1))
+	body, _ := json.Marshal(params)
+	message := &jsonrpc.Request{ID: id, Method: method, Params: body}
+	raw, _ := jsonrpc.EncodeMessage(message)
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example/mcp", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set(proxy.HeaderProtocolVersion, proxy.CurrentVersion)
-	req.Header.Set(proxy.HeaderMethod, method)
-	if method == proxy.MethodCallTool {
-		req.Header.Set(proxy.HeaderName, fmt.Sprint(params["name"]))
+	if err := proxy.SetToolHeaders(req.Header, message, nil); err != nil {
+		t.Fatal(err)
 	}
 	return req
 }

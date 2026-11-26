@@ -381,7 +381,14 @@ func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([
 	return nil
 }
 
-var nameFields = map[string]string{MethodCallTool: "name", MethodGetPrompt: "name", MethodReadResource: "uri"}
+var nameFields = map[string]string{
+	MethodCallTool:     "name",
+	MethodGetPrompt:    "name",
+	MethodReadResource: "uri",
+	MethodGetTask:      "taskId",
+	MethodUpdateTask:   "taskId",
+	MethodCancelTask:   "taskId",
+}
 
 func requestName(method string, params map[string]json.RawMessage) (HeaderArgument, *jsonrpc.Error) {
 	field, ok := nameFields[method]
@@ -390,7 +397,7 @@ func requestName(method string, params map[string]json.RawMessage) (HeaderArgume
 	}
 	var name string
 	if _ = json.Unmarshal(params[field], &name); name == "" {
-		return HeaderArgument{}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing name or uri"}
+		return HeaderArgument{}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing " + field}
 	}
 	return HeaderArgument{HeaderName, name}, nil
 }

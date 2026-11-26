@@ -54,6 +54,9 @@ func TestParseRequest(t *testing.T) {
 		{name: "other name", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {"other"}}, code: mcp.CodeHeaderMismatch},
 		{name: "empty name", method: "tools/call", params: named("name", "echo"), headers: http.Header{"Mcp-Name": {""}}, header: true, code: mcp.CodeHeaderMismatch},
 		{name: "unexpected name", headers: http.Header{"Mcp-Name": {"echo"}}, header: true, code: mcp.CodeHeaderMismatch},
+		{name: "task poll", method: "tasks/get", params: named("taskId", "t1"), headers: http.Header{"Mcp-Name": {"t1"}}, want: "t1"},
+		{name: "task update", method: "tasks/update", params: named("taskId", "t1"), headers: http.Header{"Mcp-Name": {"t1"}}, want: "t1"},
+		{name: "task cancellation", method: "tasks/cancel", params: named("taskId", "t1"), headers: http.Header{"Mcp-Name": {"t1"}}, want: "t1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			method := cmp.Or(test.method, "tools/list")
@@ -87,12 +90,24 @@ func TestToolHeaderArgumentsBoundsPagination(t *testing.T) {
 }
 
 func TestSetToolHeaders(t *testing.T) {
-	headers := http.Header{}
-	err := proxy.SetToolHeaders(headers, &jsonrpc.Request{Method: "tools/call", Params: json.RawMessage(`{"name":"echo","arguments":{"region":"eu"}}`)},
-		json.RawMessage(`{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}}}`))
-	want := http.Header{"Mcp-Method": {"tools/call"}, "Mcp-Name": {"echo"}, "Mcp-Param-Region": {"eu"}}
-	if err != nil || !reflect.DeepEqual(headers, want) {
-		t.Fatalf("headers = %v, %v; want %v", headers, err, want)
+	schema := json.RawMessage(`{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"}}}`)
+	for _, test := range []struct {
+		method, params string
+		want           http.Header
+	}{
+		{"tools/call", `{"name":"echo","arguments":{"region":"eu"}}`, http.Header{"Mcp-Method": {"tools/call"}, "Mcp-Name": {"echo"}, "Mcp-Param-Region": {"eu"}}},
+		{"tools/list", `{}`, http.Header{"Mcp-Method": {"tools/list"}}},
+		{"tasks/get", `{"taskId":"t1"}`, http.Header{"Mcp-Method": {"tasks/get"}, "Mcp-Name": {"t1"}}},
+		{"tasks/update", `{"taskId":"t1"}`, http.Header{"Mcp-Method": {"tasks/update"}, "Mcp-Name": {"t1"}}},
+		{"tasks/cancel", `{"taskId":"t1"}`, http.Header{"Mcp-Method": {"tasks/cancel"}, "Mcp-Name": {"t1"}}},
+	} {
+		t.Run(test.method, func(t *testing.T) {
+			headers := http.Header{}
+			err := proxy.SetToolHeaders(headers, &jsonrpc.Request{Method: test.method, Params: json.RawMessage(test.params)}, schema)
+			if err != nil || !reflect.DeepEqual(headers, test.want) {
+				t.Fatalf("headers = %v, %v; want %v", headers, err, test.want)
+			}
+		})
 	}
 }
 
