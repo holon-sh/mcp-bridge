@@ -16,12 +16,6 @@ import (
 // normally. Remote disconnects, cancellation, and other transport failures return
 // errors.
 func Run(ctx context.Context, remote, local mcp.Transport) error {
-	if remote == nil || local == nil {
-		return errors.New("remote and local transports are required")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	downstream, err := local.Connect(ctx)
 	if err != nil {
 		return err

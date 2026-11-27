@@ -56,7 +56,7 @@ func (t legacyFallback) RoundTrip(r *http.Request) (*http.Response, error) {
 	answer := io.TeeReader(io.LimitReader(originalBody, mcp.DefaultMaxLineLength+1), &read)
 	var reply *jsonrpc.Response
 	if stream {
-		reply = remote.Reply(answer)
+		reply = remote.Reply(answer, mcp.DefaultMaxLineLength+1)
 	} else if body, err := io.ReadAll(answer); err != nil {
 		_ = originalBody.Close()
 		return nil, err

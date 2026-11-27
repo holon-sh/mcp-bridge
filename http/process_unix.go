@@ -4,25 +4,17 @@ package mcphttp
 
 import (
 	"cmp"
-	"errors"
 	"os/exec"
 	"syscall"
 )
 
-func prepareProcess(cmd *exec.Cmd) error {
-	if cmd.SysProcAttr != nil && (cmd.SysProcAttr.Pgid != 0 || cmd.SysProcAttr.Setsid) {
-		return errors.New("bridge requires its own process group")
-	}
+// isolate runs cmd in its own process group, so signalling the group also
+// reaches its descendants.
+func isolate(cmd *exec.Cmd) error {
 	attrs := *cmp.Or(cmd.SysProcAttr, &syscall.SysProcAttr{})
 	attrs.Setpgid = true
 	cmd.SysProcAttr = &attrs
 	return nil
 }
 
-func signalProcess(cmd *exec.Cmd, force bool) {
-	signal := syscall.SIGTERM
-	if force {
-		signal = syscall.SIGKILL
-	}
-	_ = syscall.Kill(-cmd.Process.Pid, signal)
-}
+func signal(cmd *exec.Cmd, signal syscall.Signal) { _ = syscall.Kill(-cmd.Process.Pid, signal) }

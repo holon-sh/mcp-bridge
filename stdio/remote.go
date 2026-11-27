@@ -1,7 +1,6 @@
 package mcpstdio
 
 import (
-	"bufio"
 	"cmp"
 	"context"
 	"crypto/rand"
@@ -156,8 +155,14 @@ func (r *remoteConnection) listen() {
 		r.deliver(nil, fmt.Errorf("MCP notification stream: HTTP %d", res.StatusCode))
 		return
 	}
-	err = readEvents(res.Body, func(msg jsonrpc.Message) error { r.deliver(msg, nil); return r.ctx.Err() })
-	r.deliver(nil, cmp.Or(err, io.EOF))
+	for msg, err := range remote.Events(res.Body, proxy.MaxMessageBytes) {
+		if err != nil || r.ctx.Err() != nil {
+			r.deliver(nil, cmp.Or(err, r.ctx.Err()))
+			return
+		}
+		r.deliver(msg, nil)
+	}
+	r.deliver(nil, io.EOF)
 }
 
 func (r *remoteConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
@@ -297,50 +302,4 @@ func (r *remoteConnection) Close() error {
 
 func (r *remoteConnection) notifiesCancellation() bool {
 	return r.client == nil || proxy.IsLegacyVersion(r.version)
-}
-
-func readEvents(reader io.Reader, deliver func(jsonrpc.Message) error) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), proxy.MaxMessageBytes)
-	var data strings.Builder
-	event := ""
-	dispatch := func() error {
-		name := event
-		event = ""
-		value := strings.TrimSuffix(data.String(), "\n")
-		data.Reset()
-		if value == "" || name != "" && name != "message" {
-			return nil
-		}
-		msg, err := jsonrpc.DecodeMessage([]byte(value))
-		if err != nil {
-			return err
-		}
-		return deliver(msg)
-	}
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			if err := dispatch(); err != nil {
-				return err
-			}
-			continue
-		}
-		field, value, _ := strings.Cut(line, ":")
-		value = strings.TrimPrefix(value, " ")
-		switch field {
-		case "event":
-			event = value
-		case "data":
-			if data.Len()+len(value)+1 > proxy.MaxMessageBytes {
-				return errors.New("MCP event limit exceeded")
-			}
-			data.WriteString(value)
-			data.WriteByte('\n')
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return dispatch()
 }

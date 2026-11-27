@@ -72,7 +72,7 @@ func TestServeCommand(t *testing.T) {
 			}
 			finished := make(chan error, 1)
 			serverArgs := []string{os.Args[0], "-test.run=^TestCLIProcess$", "--", "server-argument", "--help", "--cwd", "server-dir", "--env", "MCP_CLI_VALUE=child-argument"}
-			args := []string{"serve", "--listen", "127.0.0.1:0", "--cwd", cwd, "--protocol-version", "2025-06-18", "--env", "MCP_CLI_FIXTURE=server", "--env", "MCP_CLI_VALUE=original", "--env", "MCP_CLI_VALUE=one,two=three", "--allow-origin", "https://client.example"}
+			args := []string{"serve", "--listen", "127.0.0.1:0", "--cwd", cwd, "--protocol-version", "2026-07-28", "--env", "MCP_CLI_FIXTURE=server", "--env", "MCP_CLI_VALUE=original", "--env", "MCP_CLI_VALUE=one,two=three", "--allow-origin", "https://client.example"}
 			args = append(args, boundary.separator...)
 			args = append(args, serverArgs...)
 			go func() {

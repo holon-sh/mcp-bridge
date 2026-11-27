@@ -5,7 +5,11 @@ package mcphttp
 import (
 	"errors"
 	"os/exec"
+	"syscall"
 )
 
-func prepareProcess(*exec.Cmd) error      { return errors.New("mcp-bridge requires a Unix process host") }
-func signalProcess(cmd *exec.Cmd, _ bool) { _ = cmd.Process.Kill() }
+// isolate refuses to run cmd: stopping a server and its descendants needs Unix
+// process groups. The rest of the module, such as mcp-bridge connect, works here.
+func isolate(*exec.Cmd) error { return errors.New("mcp-bridge serve requires a Unix process host") }
+
+func signal(cmd *exec.Cmd, _ syscall.Signal) { _ = cmd.Process.Kill() }

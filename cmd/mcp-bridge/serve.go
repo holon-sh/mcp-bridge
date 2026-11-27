@@ -89,7 +89,7 @@ func newServeCommand() *cobra.Command {
 	flags.SetInterspersed(false)
 	flags.StringVar(&listen, "listen", "127.0.0.1:8080", "HTTP listening address")
 	flags.StringVar(&dir, "cwd", "", "Server working directory")
-	flags.StringVar(&protocolVersion, "protocol-version", "", "Require one MCP protocol version (default: automatic negotiation)")
+	flags.StringVar(&protocolVersion, "protocol-version", "", "Require the current MCP protocol version, "+mcpbridge.ProtocolVersion+" (default: automatic negotiation)")
 	flags.StringArrayVar(&env, "env", nil, "Server environment override `KEY=VALUE` (repeatable)")
 	flags.StringArrayVar(&origins, "allow-origin", nil, "Trusted browser `origin` (repeatable)")
 	return command

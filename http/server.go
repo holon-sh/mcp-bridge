@@ -22,7 +22,8 @@ import (
 
 // Options controls which MCP protocol versions clients may use.
 type Options struct {
-	// ProtocolVersion restricts clients to one supported version. Empty allows negotiation.
+	// ProtocolVersion, if set, must be [ProtocolVersion]: clients must then use
+	// the current version, at any path. Empty allows negotiation.
 	ProtocolVersion string
 }
 
@@ -31,7 +32,7 @@ type Server struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	command      func() *exec.Cmd
-	version      string
+	pinned       bool
 	mu           sync.Mutex
 	current      *currentBridge
 	currentErr   error
@@ -47,7 +48,6 @@ type Server struct {
 
 type legacySession struct {
 	transport http.Handler
-	version   string
 	cancel    context.CancelFunc
 	done      chan struct{}
 	timer     *time.Timer
@@ -57,28 +57,20 @@ type legacySession struct {
 }
 
 // Start returns a handler that serves the MCP command over Streamable HTTP and
-// legacy SSE. Empty options allow protocol negotiation; ProtocolVersion restricts
-// clients to one supported revision. Cancelling ctx stops the server.
+// legacy SSE. Cancelling ctx stops the server.
 //
 // command must return a fresh, unstarted command with stdin and stdout unset.
-// It must be safe to call concurrently, and any shared stderr writer must also
+// It must be safe to call concurrently, and the command's stderr writer must
 // support concurrent use.
 func Start(ctx context.Context, command func() *exec.Cmd, opts Options) (*Server, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if command == nil {
-		return nil, errors.New("command factory is required")
-	}
-	version := opts.ProtocolVersion
-	if version != "" && !slices.Contains(mcp.SupportedProtocolVersions(), version) {
-		return nil, proxy.UnsupportedVersion(version, mcp.SupportedProtocolVersions())
+	if opts.ProtocolVersion != "" && opts.ProtocolVersion != ProtocolVersion {
+		return nil, proxy.UnsupportedVersion(opts.ProtocolVersion, []string{ProtocolVersion})
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	b := &Server{ctx: ctx, cancel: cancel, command: command, version: version, sessions: make(map[string]*legacySession), done: make(chan struct{})}
+	b := &Server{ctx: ctx, cancel: cancel, command: command, pinned: opts.ProtocolVersion != "", sessions: make(map[string]*legacySession), done: make(chan struct{})}
 	b.legacyEvents = mcp.NewMemoryEventStore(nil)
 	b.legacyEvents.SetMaxBytes(maxQueuedBytes)
-	if version != "" && !proxy.IsLegacyVersion(version) {
+	if b.pinned {
 		if _, err := b.getCurrent(); err != nil {
 			b.stop(err)
 			<-b.done
@@ -142,7 +134,7 @@ func (b *Server) getCurrent() (*currentBridge, error) {
 		b.work.Add(1)
 		b.mu.Unlock()
 		defer b.work.Done()
-		current, err := startCurrent(b.ctx, b.command(), b.version)
+		current, err := startCurrent(b.ctx, b.command(), b.pinned)
 		b.mu.Lock()
 		b.current, b.currentErr = current, err
 		b.mu.Unlock()
@@ -159,8 +151,8 @@ func (b *Server) getCurrent() (*currentBridge, error) {
 	return b.current, b.currentErr
 }
 
-// ServeHTTP serves /mcp, /sse, and /messages. When Options.ProtocolVersion is set
-// to [ProtocolVersion], the handler accepts requests at any path.
+// ServeHTTP serves /mcp, /sse, and /messages, or any path when
+// Options.ProtocolVersion is set.
 func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	closed := b.closed
@@ -169,7 +161,7 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "MCP bridge stopped", 503)
 		return
 	}
-	if b.version != "" && !proxy.IsLegacyVersion(b.version) {
+	if b.pinned {
 		current, err := b.getCurrent()
 		if err != nil {
 			http.Error(w, "MCP process unavailable", 503)
@@ -205,34 +197,22 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "initialize" {
 		var params mcp.InitializeParams
-		_ = json.Unmarshal(req.Params, &params)
+		err := json.Unmarshal(req.Params, &params)
 		if header := r.Header.Get(proxy.HeaderProtocolVersion); header != "" && header != params.ProtocolVersion {
 			WriteError(w, 400, req.ID, proxy.Mismatch(proxy.HeaderProtocolVersion))
 			return
 		}
-		if issue := prepareInitialize(req, b.version); issue != nil {
-			WriteError(w, 400, req.ID, issue)
+		if err != nil || !req.IsCall() || !proxy.IsLegacyVersion(params.ProtocolVersion) {
+			WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "initialize requires a supported legacy protocol"})
 			return
 		}
-		setBody(r, req)
-		r.Header.Set(proxy.HeaderProtocolVersion, b.version)
 		id := rand.Text()
-		t := &mcp.StreamableServerTransport{SessionID: id, EventStore: b.legacyEvents}
-		s, err := b.newSession(id, t)
+		s, err := b.newSession(id, &mcp.StreamableServerTransport{SessionID: id, EventStore: b.legacyEvents})
 		if err != nil {
 			http.Error(w, "could not start MCP session", 503)
 			return
 		}
 		s.transport.ServeHTTP(w, r)
-		return
-	}
-	if b.version != "" {
-		issue := proxy.UnsupportedVersion(r.Header.Get(proxy.HeaderProtocolVersion), []string{b.version})
-		id := jsonrpc.ID{}
-		if req, ok := msg.(*jsonrpc.Request); ok {
-			id = req.ID
-		}
-		WriteError(w, 400, id, issue)
 		return
 	}
 	current, err := b.getCurrent()
@@ -249,20 +229,6 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	current.serveHTTP(w, r, msg)
 }
 
-func prepareInitialize(req *jsonrpc.Request, version string) *jsonrpc.Error {
-	var params mcp.InitializeParams
-	if !req.IsCall() || json.Unmarshal(req.Params, &params) != nil || !proxy.IsLegacyVersion(params.ProtocolVersion) {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "initialize requires a supported legacy protocol"}
-	}
-	if version != "" {
-		var fields map[string]json.RawMessage
-		_ = json.Unmarshal(req.Params, &fields)
-		fields["protocolVersion"], _ = json.Marshal(version)
-		req.Params, _ = json.Marshal(fields)
-	}
-	return nil
-}
-
 func (b *Server) newSession(id string, transport interface {
 	mcp.Transport
 	http.Handler
@@ -273,7 +239,7 @@ func (b *Server) newSession(id string, transport interface {
 		return nil, errors.New("MCP session limit exceeded or bridge stopped")
 	}
 	ctx, cancel := context.WithCancel(b.ctx)
-	s = &legacySession{transport: transport, version: b.version, cancel: cancel, done: make(chan struct{}), timeout: 5 * time.Minute}
+	s = &legacySession{transport: transport, cancel: cancel, done: make(chan struct{}), timeout: 5 * time.Minute}
 	b.sessions[id] = s
 	b.work.Add(1)
 	b.mu.Unlock()
@@ -312,78 +278,51 @@ func (b *Server) newSession(id string, transport interface {
 	return s, nil
 }
 
+// activeConnection is a legacy client's connection. It keeps the session alive
+// while messages flow and drops responses to requests the client cancelled.
 type activeConnection struct {
 	mcp.Connection
-	session    *legacySession
-	mu         sync.Mutex
-	pending    map[jsonrpc.ID]bool
-	initialize jsonrpc.ID
+	session *legacySession
+	mu      sync.Mutex
+	pending map[jsonrpc.ID]bool
 }
 
 func (c *activeConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
-	for {
-		msg, err := c.Connection.Read(ctx)
-		if err != nil {
-			return msg, err
-		}
-		c.session.touch()
-		if req, ok := msg.(*jsonrpc.Request); ok {
-			if req.Method == "initialize" {
-				if issue := prepareInitialize(req, c.session.version); issue != nil {
-					if err := c.Connection.Write(ctx, &jsonrpc.Response{ID: req.ID, Error: issue}); err != nil {
-						return nil, err
-					}
-					continue
-				}
-			}
-			c.mu.Lock()
-			if req.IsCall() {
-				if len(c.pending) >= proxy.MaxRequests {
-					c.mu.Unlock()
-					return nil, errors.New("MCP request limit exceeded")
-				}
-				c.pending[req.ID] = false
-				if req.Method == "initialize" {
-					c.initialize = req.ID
-				}
-			} else if req.Method == "notifications/cancelled" {
-				var params mcp.CancelledParams
-				_ = json.Unmarshal(req.Params, &params)
-				id, _ := jsonrpc.MakeID(params.RequestID)
-				if _, exists := c.pending[id]; exists {
-					c.pending[id] = true
-				}
-			}
-			c.mu.Unlock()
-		}
+	msg, err := c.Connection.Read(ctx)
+	if err != nil {
+		return msg, err
+	}
+	c.session.touch()
+	req, ok := msg.(*jsonrpc.Request)
+	if !ok {
 		return msg, nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if req.IsCall() {
+		if len(c.pending) >= proxy.MaxRequests {
+			return nil, errors.New("MCP request limit exceeded")
+		}
+		c.pending[req.ID] = false
+	} else if req.Method == "notifications/cancelled" {
+		var params mcp.CancelledParams
+		_ = json.Unmarshal(req.Params, &params)
+		id, _ := jsonrpc.MakeID(params.RequestID)
+		if _, exists := c.pending[id]; exists {
+			c.pending[id] = true
+		}
+	}
+	return msg, nil
 }
 
 func (c *activeConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
 	if response, ok := msg.(*jsonrpc.Response); ok {
 		c.mu.Lock()
 		cancelled := c.pending[response.ID]
-		initialize := response.ID == c.initialize
-		if initialize {
-			c.initialize = jsonrpc.ID{}
-		}
 		delete(c.pending, response.ID)
 		c.mu.Unlock()
 		if cancelled {
 			return nil
-		}
-		if initialize && response.Error == nil && c.session.version != "" {
-			var result mcp.InitializeResult
-			if err := json.Unmarshal(response.Result, &result); err != nil {
-				return err
-			}
-			if result.ProtocolVersion != c.session.version {
-				rejected := *response
-				rejected.Result = nil
-				rejected.Error = proxy.UnsupportedVersion(c.session.version, []string{result.ProtocolVersion})
-				msg = &rejected
-			}
 		}
 	}
 	c.session.touch()
@@ -406,15 +345,9 @@ func (s *legacySession) close() {
 }
 
 func (b *Server) serveLegacy(w http.ResponseWriter, r *http.Request, id string, sse bool) {
-	if version := r.Header.Get(proxy.HeaderProtocolVersion); version != "" {
-		supported := mcp.SupportedProtocolVersions()
-		if b.version != "" {
-			supported = []string{b.version}
-		}
-		if !proxy.IsLegacyVersion(version) || b.version != "" && version != b.version {
-			WriteError(w, 400, jsonrpc.ID{}, proxy.UnsupportedVersion(version, supported))
-			return
-		}
+	if version := r.Header.Get(proxy.HeaderProtocolVersion); version != "" && !proxy.IsLegacyVersion(version) {
+		WriteError(w, 400, jsonrpc.ID{}, proxy.UnsupportedVersion(version, mcp.SupportedProtocolVersions()))
+		return
 	}
 	b.mu.Lock()
 	s := b.sessions[id]

@@ -48,7 +48,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 		WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidRequest, Message: "HTTP requests are cancelled by closing their response stream"})
 		return
 	}
-	if issue := proxy.ValidateProtocolHeader(r.Header, b.version); issue != nil {
+	if issue := proxy.ValidateProtocolHeader(r.Header, ProtocolVersion); issue != nil {
 		WriteError(w, 400, req.ID, issue)
 		return
 	}
@@ -63,23 +63,20 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 	if req.Method == "initialize" {
 		var params mcp.InitializeParams
 		_ = json.Unmarshal(req.Params, &params)
-		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{b.version}))
+		WriteError(w, 400, req.ID, proxy.UnsupportedVersion(params.ProtocolVersion, []string{ProtocolVersion}))
 		return
 	}
-	call, issue := proxy.ParseRequest(r.Header, req, b.version)
+	call, issue := proxy.ParseRequest(r.Header, req, ProtocolVersion)
 	if issue != nil {
 		WriteError(w, 400, req.ID, issue)
 		return
 	}
-	if req.Method == proxy.MethodCallTool {
-		lookup := func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
-			return b.request(ctx, method, params, r.Header)
-		}
-		arguments, err := proxy.ToolHeaderArguments(r.Context(), call, lookup)
-		if err = errors.Join(err, proxy.ValidateArgumentHeaders(r.Header, arguments)); err != nil {
-			writeHeaderError(w, req.ID, err)
-			return
-		}
+	lookup := func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+		return b.request(ctx, method, params, r.Header)
+	}
+	if err := proxy.ValidateArgumentHeaders(r.Context(), r.Header, call, lookup); err != nil {
+		writeHeaderError(w, req.ID, err)
+		return
 	}
 	c, err := b.begin(r.Context(), call, r.Header)
 	if err != nil {
@@ -127,7 +124,7 @@ func (b *currentBridge) serveHTTP(w http.ResponseWriter, r *http.Request, msg js
 				WriteError(w, 502, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInternalError, Message: "invalid discovery response"})
 				return
 			}
-			result["supportedVersions"], _ = json.Marshal([]string{b.version})
+			result["supportedVersions"], _ = json.Marshal([]string{ProtocolVersion})
 			response.Result, _ = json.Marshal(result)
 		}
 		data, _ := jsonrpc.EncodeMessage(message)

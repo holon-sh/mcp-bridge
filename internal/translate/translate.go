@@ -5,9 +5,25 @@ package translate
 import (
 	"cmp"
 	"encoding/json"
+	"runtime/debug"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// Bridge identifies the bridge when it speaks for a client or server, at the
+// version of this module that the running program was built with.
+var Bridge = &mcp.Implementation{Name: "mcp-bridge", Version: "(devel)"}
+
+func init() {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, module := range append([]*debug.Module{&info.Main}, info.Deps...) {
+			if module.Path == "github.com/holon-sh/mcp-bridge" && module.Version != "" {
+				Bridge.Version = strings.TrimPrefix(module.Version, "v")
+			}
+		}
+	}
+}
 
 // Result returns a legacy result with the fields every current result has, or
 // nil if result already has them. A legacy result is complete and carries no

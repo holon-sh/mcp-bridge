@@ -78,9 +78,10 @@ func TestParseRequest(t *testing.T) {
 	}
 }
 
-func TestToolHeaderArgumentsBoundsPagination(t *testing.T) {
+func TestArgumentHeadersBoundPagination(t *testing.T) {
 	pages := 0
-	_, err := proxy.ToolHeaderArguments(t.Context(), proxy.Request{Name: "echo"}, func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
+	call := proxy.Request{Message: &jsonrpc.Request{Method: "tools/call"}, Name: "echo"}
+	err := proxy.ValidateArgumentHeaders(t.Context(), http.Header{}, call, func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
 		pages++
 		return json.Marshal(map[string]any{"tools": []any{}, "nextCursor": strings.Repeat("x", pages%101)})
 	})
@@ -210,6 +211,9 @@ func TestPageFailures(t *testing.T) {
 }
 
 func TestHeaderEncoding(t *testing.T) {
+	headers := func(names ...string) http.Header {
+		return http.Header{"Mcp-Protocol-Version": {proxy.CurrentVersion}, "Mcp-Method": {"tools/call"}, "Mcp-Name": names}
+	}
 	for _, test := range []struct{ value, wire string }{
 		{"echo", "echo"},
 		{"发布", "=?base64?5Y+R5biD?="},
@@ -219,12 +223,12 @@ func TestHeaderEncoding(t *testing.T) {
 		if got := proxy.EncodeHeader(test.value); got != test.wire {
 			t.Errorf("encode %q = %q, want %q", test.value, got, test.wire)
 		}
-		if got, err := proxy.HeaderValue(http.Header{"Mcp-Name": {test.wire}}, "Mcp-Name"); err != nil || got != test.value {
+		if _, got, err := proxy.ParseHeaders(headers(test.wire), proxy.CurrentVersion); err != nil || got != test.value {
 			t.Errorf("decode %q = %q, %v", test.wire, got, err)
 		}
 	}
 	for _, values := range [][]string{nil, {"a", "b"}, {" unencoded "}, {"发布"}, {"=?base64?Zg=="}, {"=?base64?Zh==?="}, {"=?base64?/w==?="}, {"=?base64?Zg==\n?="}} {
-		if _, err := proxy.HeaderValue(http.Header{"Mcp-Name": values}, "Mcp-Name"); err == nil {
+		if _, _, err := proxy.ParseHeaders(headers(values...), proxy.CurrentVersion); err == nil || err.Code != mcp.CodeHeaderMismatch {
 			t.Errorf("invalid header accepted: %q", values)
 		}
 	}
