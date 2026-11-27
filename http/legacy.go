@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -42,7 +43,7 @@ import (
 //
 // [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
 func WithLegacyClients(next http.Handler, maxMessageBytes int64, tool func(r *http.Request, call proxy.Request) (json.RawMessage, error)) http.Handler {
-	lifecycle := legacyLifecycle(mcp.NewServer(clientInfo, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
+	lifecycle := legacyLifecycle(mcp.NewServer(translate.Bridge, &mcp.ServerOptions{SupportedProtocolVersions: legacyHTTPVersions}))
 	origins := http.NewCrossOriginProtection()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A request without a [protocol version header] uses 2025-03-26.
@@ -84,7 +85,7 @@ func legacyLifecycle(server *mcp.Server) http.Handler {
 }
 
 func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, request *jsonrpc.Request) {
-	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(proxy.CurrentVersion)})
+	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta()})
 	result, ok := query(w, r, next, request.ID, proxy.MethodDiscover, params)
 	if !ok {
 		return
@@ -107,7 +108,7 @@ func initializeLegacy(w http.ResponseWriter, r *http.Request, next http.Handler,
 		capabilities.AddExtension(eventsExtension, nil)
 	}
 	response := httptest.NewRecorder()
-	legacyLifecycle(mcp.NewServer(cmp.Or(discovered.Meta.ServerInfo, clientInfo), &mcp.ServerOptions{
+	legacyLifecycle(mcp.NewServer(cmp.Or(discovered.Meta.ServerInfo, translate.Bridge), &mcp.ServerOptions{
 		SupportedProtocolVersions: legacyHTTPVersions,
 		Capabilities:              capabilities,
 		Instructions:              discovered.Instructions,
@@ -135,7 +136,7 @@ func forwardLegacy(w http.ResponseWriter, r *http.Request, next http.Handler, to
 		return
 	}
 	_ = json.Unmarshal(params["_meta"], &meta)
-	bridge, _ := json.Marshal(clientMeta(proxy.CurrentVersion))
+	bridge, _ := json.Marshal(clientMeta())
 	_ = json.Unmarshal(bridge, &meta)
 	params["_meta"], _ = json.Marshal(meta)
 	request.Params, _ = json.Marshal(params)
@@ -266,7 +267,7 @@ func recordedReply(response *httptest.ResponseRecorder) *jsonrpc.Response {
 }
 
 func streamReply(body []byte) *jsonrpc.Response {
-	return remote.Reply(bytes.NewReader(body))
+	return remote.Reply(bytes.NewReader(body), math.MaxInt)
 }
 
 func decodeResponse(data []byte) *jsonrpc.Response {

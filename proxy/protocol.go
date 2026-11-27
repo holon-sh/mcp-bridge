@@ -31,16 +31,6 @@ const (
 	MethodGetPrompt    = "prompts/get"
 )
 
-// The methods of the Tasks extension that carry their task's ID in the
-// Mcp-Name header, as its [routing headers] require.
-//
-// [routing headers]: https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks#streamable-http-routing-headers
-const (
-	MethodGetTask    = "tasks/get"
-	MethodUpdateTask = "tasks/update"
-	MethodCancelTask = "tasks/cancel"
-)
-
 // IsLegacyVersion reports whether version is a supported MCP revision older
 // than [CurrentVersion].
 func IsLegacyVersion(version string) bool {

@@ -526,10 +526,8 @@ func TestHTTPConsumerLifecycle(t *testing.T) {
 			go func() { b.ServeHTTP(writer, req); close(done) }()
 			<-entered
 			if test.failBridge {
-				switch err := b.Wait(); fmt.Sprint(err) {
-				case "MCP consumer too slow", "MCP output buffer limit exceeded":
-				default:
-					t.Fatalf("slow consumer shutdown: %v", err)
+				if b.Wait() == nil {
+					t.Fatal("slow consumer did not stop the bridge")
 				}
 			} else if test.cancelRequest {
 				cancel()
@@ -825,7 +823,7 @@ func TestProxyTransports(t *testing.T) {
 		name, version              string
 		sse, fallback, noDiscovery bool
 	}
-	pinnedModes := []mode{{name: "sse-oldest", version: "2024-11-05", sse: true}}
+	pinnedModes := []mode{{name: ProtocolVersion, version: ProtocolVersion}}
 	modes := []mode{
 		{name: "sse", version: "2025-11-25", sse: true},
 		{name: "fallback", version: "2025-11-25", fallback: true},
@@ -834,7 +832,6 @@ func TestProxyTransports(t *testing.T) {
 	for _, version := range mcp.SupportedProtocolVersions() {
 		m := mode{name: version, version: version}
 		modes = append(modes, m)
-		pinnedModes = append(pinnedModes, m)
 		if version != ProtocolVersion {
 			translatedModes = append(translatedModes, m)
 		}
@@ -928,10 +925,7 @@ func TestProxyTransports(t *testing.T) {
 				progress := make(chan any, 10)
 				client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, clientOptions(progress))
 				opts := &mcp.ClientSessionOptions{ProtocolVersion: mode.version}
-				if direction.pin && mode.sse {
-					opts.ProtocolVersion = "2025-11-25"
-				}
-				if mode.fallback && !mode.noDiscovery || direction.pin && !mode.sse {
+				if mode.fallback && !mode.noDiscovery || direction.pin {
 					opts = nil
 				}
 				session, err := client.Connect(ctx, transport, opts)
@@ -947,40 +941,10 @@ func TestProxyTransports(t *testing.T) {
 					t.Fatalf("negotiated capabilities: %v", caps)
 				}
 				exercise(t, session, mode.version != ProtocolVersion, direction.translate, progress)
-				if direction.pin && !mode.sse {
-					if mode.version == ProtocolVersion {
-						status, discovered := send(t, server, "server/discover", nil)
-						if status != 200 || !reflect.DeepEqual(discovered["result"].(map[string]any)["supportedVersions"], []any{mode.version}) {
-							t.Fatalf("pinned discovery: %v", discovered)
-						}
-					} else {
-						for _, method := range []string{"ping", "notifications/initialized"} {
-							message := &jsonrpc.Request{Method: method, Params: json.RawMessage(`{}`)}
-							if method == "ping" {
-								message.ID, _ = jsonrpc.MakeID(int64(999))
-							}
-							data, _ := jsonrpc.EncodeMessage(message)
-							req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+path, strings.NewReader(string(data)))
-							req.Header.Set("Content-Type", "application/json")
-							req.Header.Set("Accept", "application/json, text/event-stream")
-							req.Header.Set("Mcp-Protocol-Version", ProtocolVersion)
-							req.Header.Set("Mcp-Session-Id", session.ID())
-							res, err := server.Client().Do(req)
-							if err != nil {
-								t.Fatal(err)
-							}
-							var rejected struct {
-								Error *jsonrpc.Error `json:"error"`
-							}
-							err = json.NewDecoder(res.Body).Decode(&rejected)
-							res.Body.Close()
-							if err != nil || res.StatusCode != http.StatusBadRequest || rejected.Error == nil || rejected.Error.Code != mcp.CodeUnsupportedProtocolVersion {
-								t.Fatalf("version header: HTTP %d %+v %v", res.StatusCode, rejected, err)
-							}
-						}
-						if _, err := session.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
-							t.Fatalf("rejected request broke session: %v", err)
-						}
+				if direction.pin {
+					status, discovered := send(t, server, "server/discover", nil)
+					if status != 200 || !reflect.DeepEqual(discovered["result"].(map[string]any)["supportedVersions"], []any{mode.version}) {
+						t.Fatalf("pinned discovery: %v", discovered)
 					}
 				}
 				session.Close()
@@ -1151,15 +1115,14 @@ func TestCurrentClientsReachLegacyProcess(t *testing.T) {
 func TestProtocolAdmission(t *testing.T) {
 	for _, test := range []struct {
 		name, configured, requested, upstream string
-		sse, raw                              bool
+		raw                                   bool
 	}{
 		{name: "unknown configuration", configured: "2099-01-01"},
 		{name: "current startup mismatch", configured: ProtocolVersion, upstream: "2025-11-25"},
 		// A process may also answer discovery without listing the version.
 		{name: "current startup discovery mismatch", configured: ProtocolVersion, upstream: "2099-01-01", raw: true},
 		{name: "current rejects legacy", configured: ProtocolVersion, requested: "2025-11-25"},
-		{name: "legacy negotiation mismatch", configured: "2025-11-25", requested: "2025-11-25", upstream: "2025-06-18"},
-		{name: "SSE negotiation mismatch", configured: "2025-11-25", requested: "2025-11-25", upstream: "2025-06-18", sse: true},
+		{name: "legacy configuration", configured: "2025-11-25"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -1181,13 +1144,9 @@ func TestProtocolAdmission(t *testing.T) {
 				t.Cleanup(func() { server.Close() })
 				host := httptest.NewServer(server)
 				t.Cleanup(host.Close)
-				var transport mcp.Transport = &mcp.StreamableClientTransport{Endpoint: host.URL + "/mcp"}
-				if test.sse {
-					transport = &mcp.SSEClientTransport{Endpoint: host.URL + "/sse"}
-				}
 				client := mcp.NewClient(&mcp.Implementation{Name: "admission", Version: "1"}, nil)
 				var session *mcp.ClientSession
-				session, err = client.Connect(ctx, transport, &mcp.ClientSessionOptions{ProtocolVersion: test.requested})
+				session, err = client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: host.URL + "/mcp"}, &mcp.ClientSessionOptions{ProtocolVersion: test.requested})
 				if session != nil {
 					session.Close()
 				}

@@ -1,7 +1,6 @@
 package mcphttp
 
 import (
-	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -31,7 +30,6 @@ const (
 
 type currentBridge struct {
 	conn     mcp.Connection
-	version  string
 	pinned   bool
 	log      io.Writer
 	mu       sync.Mutex
@@ -59,29 +57,16 @@ type delivery struct {
 	size    int
 }
 
-type lockedWriter struct {
-	sync.Mutex
-	io.Writer
-}
-
-func (w *lockedWriter) Write(p []byte) (int, error) {
-	w.Lock()
-	defer w.Unlock()
-	return w.Writer.Write(p)
-}
-
-func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentBridge, error) {
+func startCurrent(ctx context.Context, cmd *exec.Cmd, pinned bool) (*currentBridge, error) {
 	conn, err := startProcess(ctx, cmd)
 	if err != nil {
 		return nil, err
 	}
-	pinned := version != ""
-	version = cmp.Or(version, ProtocolVersion)
-	b := &currentBridge{conn: conn, version: version, pinned: pinned, log: conn.log, pending: map[string]*call{}, stopping: make(chan struct{}), done: make(chan struct{})}
+	b := &currentBridge{conn: conn, pinned: pinned, log: conn.log, pending: map[string]*call{}, stopping: make(chan struct{}), done: make(chan struct{})}
 	go b.read()
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta(version)})
+	params, _ := json.Marshal(&mcp.DiscoverParams{Meta: clientMeta()})
 	result, err := b.request(probeCtx, proxy.MethodDiscover, params, nil)
 	if errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound}) || errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams}) {
 		// Servers that predate MCP 2026-07-28 reject server/discover: the TypeScript and
@@ -92,8 +77,8 @@ func startCurrent(ctx context.Context, cmd *exec.Cmd, version string) (*currentB
 	} else if err == nil {
 		var discovered mcp.DiscoverResult
 		err = json.Unmarshal(result, &discovered)
-		if err == nil && !slices.Contains(discovered.SupportedVersions, version) {
-			err = proxy.UnsupportedVersion(version, discovered.SupportedVersions)
+		if err == nil && !slices.Contains(discovered.SupportedVersions, ProtocolVersion) {
+			err = proxy.UnsupportedVersion(ProtocolVersion, discovered.SupportedVersions)
 		}
 	}
 	if err != nil {
@@ -110,7 +95,7 @@ func (b *currentBridge) initialize(ctx context.Context) error {
 	versions := mcp.SupportedProtocolVersions()
 	params, _ := json.Marshal(&mcp.InitializeParams{
 		ProtocolVersion: versions[slices.IndexFunc(versions, proxy.IsLegacyVersion)],
-		ClientInfo:      clientInfo,
+		ClientInfo:      translate.Bridge,
 		Capabilities:    &mcp.ClientCapabilities{},
 	})
 	result, err := b.request(ctx, "initialize", params, nil)
@@ -128,12 +113,10 @@ func (b *currentBridge) initialize(ctx context.Context) error {
 	return b.write(ctx, &jsonrpc.Request{Method: "notifications/initialized"})
 }
 
-var clientInfo = &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.15"}
-
-func clientMeta(version string) mcp.Meta {
+func clientMeta() mcp.Meta {
 	return mcp.Meta{
-		mcp.MetaKeyProtocolVersion:    version,
-		mcp.MetaKeyClientInfo:         clientInfo,
+		mcp.MetaKeyProtocolVersion:    ProtocolVersion,
+		mcp.MetaKeyClientInfo:         translate.Bridge,
 		mcp.MetaKeyClientCapabilities: map[string]any{},
 	}
 }

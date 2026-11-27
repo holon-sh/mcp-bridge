@@ -5,11 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"slices"
-	"sync"
-	"time"
 
 	"github.com/holon-sh/mcp-bridge/internal/translate"
 	"github.com/holon-sh/mcp-bridge/proxy"
@@ -17,50 +14,37 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// runLegacy serves a 2025 client on downstream from a current upstream session.
+// It forwards tools, resources, prompts, completions and progress; resource
+// subscriptions, tasks and input-required results do not survive translation.
 func runLegacy(ctx context.Context, remote *mcp.StreamableClientTransport, downstream mcp.Connection, initialize *mcp.InitializeParams) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	b := &legacyBridge{local: downstream, cancel: cancel, subscriptions: make(map[string]*legacySubscription), listens: make(map[jsonrpc.ID]*legacySubscription)}
-	if err := b.connect(ctx, remote, initialize); err != nil {
+	session, err := connectCurrent(ctx, cancel, remote, downstream, initialize)
+	if err != nil {
 		return err
 	}
-	defer b.session.Close()
-	upstream := b.session.InitializeResult()
-	info := cmp.Or(upstream.ServerInfo, &mcp.Implementation{Name: "mcp-bridge", Version: "0.0.15"})
-	caps := translate.Capabilities(upstream.Capabilities)
-	if caps.Resources != nil {
-		// This bridge translates resource subscriptions.
-		caps.Resources.Subscribe = upstream.Capabilities.Resources.Subscribe
-	}
-	server := mcp.NewServer(info, &mcp.ServerOptions{
-		Instructions: upstream.Instructions,
-		Capabilities: caps,
-		SubscribeHandler: func(ctx context.Context, req *mcp.SubscribeRequest) error {
-			return b.subscribe(ctx, req.Params)
-		},
-		UnsubscribeHandler: func(ctx context.Context, req *mcp.UnsubscribeRequest) error {
-			b.subscriptionOps.Lock()
-			defer b.subscriptionOps.Unlock()
-			return b.unsubscribe(ctx, req.Params.URI)
-		},
+	defer session.Close()
+	upstream := session.InitializeResult()
+	server := mcp.NewServer(cmp.Or(upstream.ServerInfo, translate.Bridge), &mcp.ServerOptions{
+		Instructions:              upstream.Instructions,
+		Capabilities:              translate.Capabilities(upstream.Capabilities),
 		SupportedProtocolVersions: slices.DeleteFunc(mcp.SupportedProtocolVersions(), func(v string) bool { return !proxy.IsLegacyVersion(v) }),
 	})
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			switch method {
-			case "initialize", "notifications/initialized", "notifications/cancelled", "ping", "resources/subscribe", "resources/unsubscribe":
+			case "initialize", "notifications/initialized", "notifications/cancelled", "ping":
 				return next(ctx, method, req)
 			}
-			result, err := b.forward(ctx, method, req.GetParams())
-			if err == nil {
-				if r, ok := result.(interface{ NeedsInput() bool }); ok && r.NeedsInput() {
-					return nil, errors.New("MCP translation does not support input-required results")
-				}
+			result, err := forward(ctx, session, method, req.GetParams())
+			if r, ok := result.(interface{ NeedsInput() bool }); ok && err == nil && r.NeedsInput() {
+				return nil, errors.New("MCP translation does not support input-required results")
 			}
 			return result, err
 		}
 	})
-	err := server.Run(ctx, connectionTransport{legacyClient{downstream}})
+	err = server.Run(ctx, connectionTransport{legacyClient{downstream}})
 	return cmp.Or(context.Cause(ctx), err)
 }
 
@@ -81,64 +65,42 @@ func (t connectionTransport) Connect(context.Context) (mcp.Connection, error) {
 	return t.Connection, nil
 }
 
-type legacyBridge struct {
-	local           mcp.Connection
-	cancel          context.CancelCauseFunc
-	session         *mcp.ClientSession
-	subMu           sync.Mutex
-	subscriptions   map[string]*legacySubscription
-	subscriptionOps sync.Mutex
-	listens         map[jsonrpc.ID]*legacySubscription
-}
-
-func (b *legacyBridge) connect(ctx context.Context, remote *mcp.StreamableClientTransport, params *mcp.InitializeParams) error {
+// connectCurrent opens a current session with remote for the client that sent
+// initialize, and relays upstream progress notifications to local.
+func connectCurrent(ctx context.Context, cancel context.CancelCauseFunc, remote *mcp.StreamableClientTransport, local mcp.Connection, initialize *mcp.InitializeParams) (*mcp.ClientSession, error) {
 	upstream, err := connectRemote(ctx, remote)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	observer := &legacyUpstream{Connection: upstream, bridge: b}
-	client := mcp.NewClient(params.ClientInfo, &mcp.ClientOptions{
-		Capabilities:   &mcp.ClientCapabilities{Extensions: translate.AppExtension(params.Capabilities.Extensions)},
+	client := mcp.NewClient(initialize.ClientInfo, &mcp.ClientOptions{
+		Capabilities:   &mcp.ClientCapabilities{Extensions: translate.AppExtension(initialize.Capabilities.Extensions)},
 		MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
-	})
-	client.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			result, err := next(ctx, method, req)
-			if err != nil {
-				return nil, err
+		ProgressNotificationHandler: func(ctx context.Context, req *mcp.ProgressNotificationClientRequest) {
+			raw, _ := json.Marshal(req.Params)
+			if err := local.Write(ctx, &jsonrpc.Request{Method: "notifications/progress", Params: raw}); err != nil {
+				cancel(err)
 			}
-			switch method {
-			case "notifications/resources/updated":
-				id, _ := jsonrpc.MakeID(req.GetParams().GetMeta()[mcp.MetaKeySubscriptionID])
-				b.subMu.Lock()
-				sub := b.listens[id]
-				active := sub != nil && sub == b.subscriptions[req.GetParams().(*mcp.ResourceUpdatedNotificationParams).URI]
-				b.subMu.Unlock()
-				if !active {
-					return result, nil
-				}
-				fallthrough
-			case "notifications/progress":
-				delete(req.GetParams().GetMeta(), mcp.MetaKeySubscriptionID)
-				raw, _ := json.Marshal(req.GetParams())
-				if err := b.local.Write(ctx, &jsonrpc.Request{Method: method, Params: raw}); err != nil {
-					b.cancel(err)
-				}
-			}
-			return result, nil
-		}
+		},
 	})
-	b.session, err = client.Connect(ctx, connectionTransport{observer}, &mcp.ClientSessionOptions{ProtocolVersion: proxy.CurrentVersion})
+	session, err := client.Connect(ctx, connectionTransport{currentOnly{upstream}}, &mcp.ClientSessionOptions{ProtocolVersion: proxy.CurrentVersion})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	go func() {
-		b.cancel(cmp.Or(b.session.Wait(), errors.New("upstream connection closed")))
-	}()
-	return nil
+	go func() { cancel(cmp.Or(session.Wait(), errors.New("upstream connection closed"))) }()
+	return session, nil
 }
 
-func (b *legacyBridge) forward(ctx context.Context, method string, params mcp.Params) (mcp.Result, error) {
+// currentOnly keeps the upstream session from falling back to initialize.
+type currentOnly struct{ mcp.Connection }
+
+func (c currentOnly) Write(ctx context.Context, msg jsonrpc.Message) error {
+	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "initialize" {
+		return errors.New("MCP translation requires a modern upstream; initialize fallback is disabled")
+	}
+	return c.Connection.Write(ctx, msg)
+}
+
+func forward(ctx context.Context, session *mcp.ClientSession, method string, params mcp.Params) (mcp.Result, error) {
 	// Replace client-supplied protocol metadata with the negotiated upstream identity.
 	// The SDK supplies typed params, including typed nil for optional params.
 	if !reflect.ValueOf(params).IsNil() {
@@ -149,139 +111,23 @@ func (b *legacyBridge) forward(ctx context.Context, method string, params mcp.Pa
 	}
 	switch method {
 	case "tools/list":
-		return b.session.ListTools(ctx, params.(*mcp.ListToolsParams))
+		return session.ListTools(ctx, params.(*mcp.ListToolsParams))
 	case "tools/call":
 		call := params.(*mcp.CallToolParamsRaw)
-		return b.session.CallTool(ctx, &mcp.CallToolParams{Meta: call.Meta, Name: call.Name, Arguments: call.Arguments})
+		return session.CallTool(ctx, &mcp.CallToolParams{Meta: call.Meta, Name: call.Name, Arguments: call.Arguments})
 	case "resources/list":
-		return b.session.ListResources(ctx, params.(*mcp.ListResourcesParams))
+		return session.ListResources(ctx, params.(*mcp.ListResourcesParams))
 	case "resources/templates/list":
-		return b.session.ListResourceTemplates(ctx, params.(*mcp.ListResourceTemplatesParams))
+		return session.ListResourceTemplates(ctx, params.(*mcp.ListResourceTemplatesParams))
 	case "resources/read":
-		return b.session.ReadResource(ctx, params.(*mcp.ReadResourceParams))
+		return session.ReadResource(ctx, params.(*mcp.ReadResourceParams))
 	case "prompts/list":
-		return b.session.ListPrompts(ctx, params.(*mcp.ListPromptsParams))
+		return session.ListPrompts(ctx, params.(*mcp.ListPromptsParams))
 	case "prompts/get":
-		return b.session.GetPrompt(ctx, params.(*mcp.GetPromptParams))
+		return session.GetPrompt(ctx, params.(*mcp.GetPromptParams))
 	case "completion/complete":
-		return b.session.Complete(ctx, params.(*mcp.CompleteParams))
+		return session.Complete(ctx, params.(*mcp.CompleteParams))
 	default:
 		return nil, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "unsupported in MCP translation: " + method}
 	}
-}
-
-type legacySubscription struct {
-	uri          string
-	ready        chan error
-	acknowledged bool
-}
-
-func (b *legacyBridge) subscribe(ctx context.Context, params *mcp.SubscribeParams) error {
-	b.subscriptionOps.Lock()
-	defer b.subscriptionOps.Unlock()
-	if caps := b.session.InitializeResult().Capabilities.Resources; caps == nil || !caps.Subscribe {
-		return &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "upstream does not support this resource subscription"}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	b.subMu.Lock()
-	if b.subscriptions[params.URI] != nil {
-		b.subMu.Unlock()
-		return nil
-	}
-	if len(b.subscriptions) >= proxy.MaxRequests {
-		b.subMu.Unlock()
-		return errors.New("resource subscription limit exceeded")
-	}
-	sub := &legacySubscription{uri: params.URI, ready: make(chan error, 1)}
-	b.subscriptions[params.URI] = sub
-	b.subMu.Unlock()
-	err := b.session.Subscribe(ctx, params)
-	if err == nil {
-		select {
-		case err = <-sub.ready:
-		case <-ctx.Done():
-			err = ctx.Err()
-		}
-	}
-	if err != nil {
-		_ = b.unsubscribe(context.WithoutCancel(ctx), params.URI)
-	}
-	return err
-}
-
-func (b *legacyBridge) unsubscribe(ctx context.Context, uri string) error {
-	b.subMu.Lock()
-	delete(b.subscriptions, uri)
-	for id, sub := range b.listens {
-		if sub.uri == uri {
-			delete(b.listens, id)
-		}
-	}
-	b.subMu.Unlock()
-	return b.session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: uri})
-}
-
-type legacyUpstream struct {
-	mcp.Connection
-	bridge *legacyBridge
-}
-
-func (u *legacyUpstream) Write(ctx context.Context, msg jsonrpc.Message) error {
-	if req, ok := msg.(*jsonrpc.Request); ok {
-		if req.Method == "initialize" {
-			return errors.New("MCP translation requires a modern upstream; initialize fallback is disabled")
-		}
-		if req.Method == "subscriptions/listen" {
-			var params mcp.SubscriptionsListenParams
-			_ = json.Unmarshal(req.Params, &params)
-			u.bridge.subMu.Lock()
-			// ClientSession.Subscribe opens one stream for the URI registered by
-			// subscribe; subscriptionOps holds it in place until acknowledgement.
-			uri := params.Notifications.ResourceSubscriptions[0]
-			u.bridge.listens[req.ID] = u.bridge.subscriptions[uri]
-			u.bridge.subMu.Unlock()
-		}
-	}
-	return u.Connection.Write(ctx, msg)
-}
-
-func (u *legacyUpstream) Read(ctx context.Context) (jsonrpc.Message, error) {
-	msg, err := u.Connection.Read(ctx)
-	if err != nil {
-		return msg, err
-	}
-	u.bridge.subMu.Lock()
-	defer u.bridge.subMu.Unlock()
-	switch msg := msg.(type) {
-	case *jsonrpc.Request:
-		if msg.Method != "notifications/subscriptions/acknowledged" {
-			break
-		}
-		var params mcp.SubscriptionsAcknowledgedParams
-		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			return nil, err
-		}
-		id, _ := jsonrpc.MakeID(params.Meta[mcp.MetaKeySubscriptionID])
-		if sub := u.bridge.listens[id]; sub != nil && !sub.acknowledged {
-			if slices.Contains(params.Notifications.ResourceSubscriptions, sub.uri) {
-				sub.acknowledged = true
-				sub.ready <- nil
-			} else {
-				delete(u.bridge.listens, id)
-				sub.ready <- fmt.Errorf("upstream declined resource subscription %q", sub.uri)
-			}
-		}
-	case *jsonrpc.Response:
-		if sub := u.bridge.listens[msg.ID]; sub != nil {
-			delete(u.bridge.listens, msg.ID)
-			issue := fmt.Errorf("upstream subscription ended for %q; reconnect and resubscribe", sub.uri)
-			if sub.acknowledged {
-				u.bridge.cancel(issue)
-			} else {
-				sub.ready <- issue
-			}
-		}
-	}
-	return msg, nil
 }

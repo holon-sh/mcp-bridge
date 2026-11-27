@@ -50,7 +50,7 @@ Flags:
       --env KEY=VALUE             Server environment override KEY=VALUE (repeatable)
   -h, --help                      help for serve
       --listen string             HTTP listening address (default "127.0.0.1:8080")
-      --protocol-version string   Require one MCP protocol version (default: automatic negotiation)
+      --protocol-version string   Require the current MCP protocol version, 2026-07-28 (default: automatic negotiation)
 ```
 
 </details>
@@ -150,14 +150,14 @@ For clients using an `mcpServers` configuration:
 ## Go API
 
 ```sh
-go get github.com/holon-sh/mcp-bridge@v0.0.15
+go get github.com/holon-sh/mcp-bridge@latest
 ```
 
 This repository provides these Go packages:
 
 - [`github.com/holon-sh/mcp-bridge/http`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/http) serves stdio MCP servers over HTTP.
 - [`github.com/holon-sh/mcp-bridge/stdio`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/stdio) exposes a remote HTTP MCP server through a local transport, usually stdio.
-- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) provides raw tool pagination, MCP header encoding, and connection relaying for embedding proxies.
+- [`github.com/holon-sh/mcp-bridge/proxy`](https://pkg.go.dev/github.com/holon-sh/mcp-bridge/proxy) pages MCP list methods, checks and sets MCP HTTP headers, reaches 2025 servers for current clients, and relays connections, for embedding proxies.
 
 They run inside your Go program without invoking the CLI.
 

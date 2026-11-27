@@ -18,36 +18,35 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// The [standard request headers] of the Streamable HTTP transport, and the
-// prefix of the headers that carry [x-mcp-header] tool arguments.
+// The [standard request headers] of the Streamable HTTP transport.
 //
 // [standard request headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#standard-request-headers
-// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
 const (
 	HeaderProtocolVersion = "Mcp-Protocol-Version"
 	HeaderMethod          = "Mcp-Method"
 	HeaderName            = "Mcp-Name"
-	HeaderParamPrefix     = "Mcp-Param-"
 )
+
+// paramPrefix begins the headers that carry [x-mcp-header] tool arguments.
+//
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+const paramPrefix = "Mcp-Param-"
 
 type headerProperty struct {
 	Header     string                    `json:"x-mcp-header"`
 	Properties map[string]headerProperty `json:"properties"`
 }
 
-// HeaderArgument associates a tool argument value with its MCP HTTP header.
-// Obtain values from [ToolHeaderArguments] and pass them to [ValidateArgumentHeaders].
-type HeaderArgument struct {
+// headerArgument is a request argument and the MCP HTTP header that carries it.
+type headerArgument struct {
 	name  string
 	value any
 }
 
-// ToolHeaderArguments returns the [x-mcp-header] arguments of a tools/call,
-// as declared by the called tool's input schema. request sends the tools/list
-// requests that find the tool. It returns nil if the tool is not listed.
-//
-// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
-func ToolHeaderArguments(ctx context.Context, call Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]HeaderArgument, error) {
+// toolArguments returns the header arguments of a tools/call, as declared by
+// the called tool's input schema. request sends the tools/list requests that
+// find the tool. It returns nil if the tool is not listed.
+func toolArguments(ctx context.Context, call Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) ([]headerArgument, error) {
 	meta := maps.Clone(call.Meta)
 	delete(meta, "progressToken")
 	raw, _ := json.Marshal(map[string]any{"_meta": meta})
@@ -72,20 +71,20 @@ func ToolHeaderArguments(ctx context.Context, call Request, request func(context
 	return nil, nil
 }
 
-func schemaArguments(inputSchema, rawArguments json.RawMessage) ([]HeaderArgument, error) {
+func schemaArguments(inputSchema, rawArguments json.RawMessage) ([]headerArgument, error) {
 	var schema headerProperty
 	if err := json.Unmarshal(inputSchema, &schema); err != nil {
 		return nil, err
 	}
 	var arguments map[string]any
 	_ = json.Unmarshal(rawArguments, &arguments)
-	var headers []HeaderArgument
+	var headers []headerArgument
 	var collect func(map[string]headerProperty, map[string]any)
 	collect = func(properties map[string]headerProperty, arguments map[string]any) {
 		for name, property := range properties {
 			value := arguments[name]
 			if property.Header != "" {
-				headers = append(headers, HeaderArgument{HeaderParamPrefix + property.Header, value})
+				headers = append(headers, headerArgument{paramPrefix + property.Header, value})
 			}
 			nested, _ := value.(map[string]any)
 			collect(property.Properties, nested)
@@ -145,7 +144,7 @@ func Pages[T any](ctx context.Context, method, field string, params json.RawMess
 }
 
 // EncodeHeader formats text for use in an MCP HTTP header, preserving Unicode
-// characters and whitespace. Use [DecodeHeader] to recover the original text.
+// characters and whitespace.
 func EncodeHeader(text string) string {
 	if strings.HasPrefix(text, "=?base64?") || strings.TrimSpace(text) != text || strings.IndexFunc(text, func(c rune) bool { return c < 0x20 || c > 0x7e }) >= 0 {
 		return "=?base64?" + base64.StdEncoding.EncodeToString([]byte(text)) + "?="
@@ -153,18 +152,31 @@ func EncodeHeader(text string) string {
 	return text
 }
 
-// ValidateArgumentHeaders checks that headers match the tool arguments returned
-// by [ToolHeaderArguments]. Missing or null arguments require no header.
-// It returns an MCP header-mismatch error for missing, duplicate, or invalid
-// argument headers. Unrelated headers are ignored.
-func ValidateArgumentHeaders(headers http.Header, arguments []HeaderArgument) error {
+// ValidateArgumentHeaders checks the [x-mcp-header] argument headers of call,
+// a tools/call checked with [ParseRequest], against the input schema of the
+// tool it names; other methods have none. request sends the tools/list requests
+// that find the tool, and a tool that is not listed has none.
+//
+// Missing or null arguments require no header. It returns an MCP
+// header-mismatch error for a missing, duplicate or invalid argument header,
+// and ignores unrelated headers.
+//
+// [x-mcp-header]: https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header
+func ValidateArgumentHeaders(ctx context.Context, headers http.Header, call Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) error {
+	if call.Message.Method != MethodCallTool {
+		return nil
+	}
+	arguments, err := toolArguments(ctx, call, request)
+	if err != nil {
+		return err
+	}
 	for _, argument := range arguments {
 		name, value := argument.name, argument.value
 		if value == nil {
 			if len(headers.Values(name)) != 0 {
 				return Mismatch(name)
 			}
-		} else if header, err := HeaderValue(headers, name); err != nil || !primitiveMatches(value, header) {
+		} else if header, err := headerValue(headers, name); err != nil || !primitiveMatches(value, header) {
 			return Mismatch(name)
 		}
 	}
@@ -185,19 +197,14 @@ func primitiveMatches(value any, header string) bool {
 	}
 }
 
-// HeaderValue returns the decoded text of the named MCP header.
-// Missing, duplicate, or invalid values return an error.
-func HeaderValue(headers http.Header, name string) (string, error) {
+// headerValue returns the decoded text of the named MCP header, as
+// [EncodeHeader] encodes it. Missing, duplicate, or invalid values return an error.
+func headerValue(headers http.Header, name string) (string, error) {
 	values := headers.Values(name)
 	if len(values) != 1 {
 		return "", fmt.Errorf("expected one %s header", name)
 	}
-	return DecodeHeader(values[0])
-}
-
-// DecodeHeader recovers the text of an MCP HTTP header value.
-// Invalid header values return an error.
-func DecodeHeader(value string) (string, error) {
+	value := values[0]
 	if encoded, ok := strings.CutPrefix(value, "=?base64?"); ok {
 		encoded, ok = strings.CutSuffix(encoded, "?=")
 		if !ok {
@@ -258,7 +265,7 @@ func ParseHeaders(headers http.Header, expected string) (method, name string, is
 		}
 		return method, "", nil
 	}
-	if name, err := HeaderValue(headers, HeaderName); err == nil && name != "" {
+	if name, err := headerValue(headers, HeaderName); err == nil && name != "" {
 		return method, name, nil
 	}
 	return "", "", Mismatch(HeaderName)
@@ -279,7 +286,7 @@ type Request struct {
 
 // ParseRequest parses an MCP request for an intermediary, checking it against
 // its headers as [server validation] requires. [x-mcp-header] arguments are
-// checked separately by [ValidateArgumentHeaders].
+// checked by [ValidateArgumentHeaders].
 //
 // On failure it returns the protocol error to answer with, and a Request
 // holding as much of the message as it could parse, so the answer can carry
@@ -328,16 +335,16 @@ func ParseRequest(headers http.Header, message jsonrpc.Message, expected string)
 }
 
 // SetHeaders sets the [request metadata headers] for req, looking up tools/call
-// schemas with request as [ToolHeaderArguments] does.
+// schemas with request as [ValidateArgumentHeaders] does.
 //
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, request func(context.Context, string, json.RawMessage) (json.RawMessage, error)) error {
-	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
+	return setHeaders(headers, req, func(call Request) ([]headerArgument, error) {
 		if req.Method != MethodCallTool {
 			return nil, nil
 		}
 		_ = json.Unmarshal(call.Params["_meta"], &call.Meta)
-		return ToolHeaderArguments(ctx, call, request)
+		return toolArguments(ctx, call, request)
 	})
 }
 
@@ -347,7 +354,7 @@ func SetHeaders(ctx context.Context, headers http.Header, req *jsonrpc.Request, 
 //
 // [request metadata headers]: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#request-metadata
 func SetToolHeaders(headers http.Header, req *jsonrpc.Request, inputSchema json.RawMessage) error {
-	return setHeaders(headers, req, func(call Request) ([]HeaderArgument, error) {
+	return setHeaders(headers, req, func(call Request) ([]headerArgument, error) {
 		if inputSchema == nil {
 			return nil, nil
 		}
@@ -355,7 +362,7 @@ func SetToolHeaders(headers http.Header, req *jsonrpc.Request, inputSchema json.
 	})
 }
 
-func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([]HeaderArgument, error)) error {
+func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([]headerArgument, error)) error {
 	call := Request{Message: req}
 	_ = json.Unmarshal(req.Params, &call.Params)
 	name, issue := requestName(req.Method, call.Params)
@@ -368,7 +375,7 @@ func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([
 		return err
 	}
 	headers.Set(HeaderMethod, req.Method)
-	for _, argument := range append([]HeaderArgument{name}, arguments...) {
+	for _, argument := range append([]headerArgument{name}, arguments...) {
 		if argument.value == nil {
 			continue
 		}
@@ -381,23 +388,28 @@ func setHeaders(headers http.Header, req *jsonrpc.Request, tool func(Request) ([
 	return nil
 }
 
+// nameFields holds, for each method that carries a name in the Mcp-Name
+// header, the params field that holds it. The Tasks extension's methods carry
+// their task's ID, as its [routing headers] require.
+//
+// [routing headers]: https://tasks.extensions.modelcontextprotocol.io/specification/2026-07-28/tasks#streamable-http-routing-headers
 var nameFields = map[string]string{
 	MethodCallTool:     "name",
 	MethodGetPrompt:    "name",
 	MethodReadResource: "uri",
-	MethodGetTask:      "taskId",
-	MethodUpdateTask:   "taskId",
-	MethodCancelTask:   "taskId",
+	"tasks/get":        "taskId",
+	"tasks/update":     "taskId",
+	"tasks/cancel":     "taskId",
 }
 
-func requestName(method string, params map[string]json.RawMessage) (HeaderArgument, *jsonrpc.Error) {
+func requestName(method string, params map[string]json.RawMessage) (headerArgument, *jsonrpc.Error) {
 	field, ok := nameFields[method]
 	if !ok {
-		return HeaderArgument{name: HeaderName}, nil
+		return headerArgument{name: HeaderName}, nil
 	}
 	var name string
 	if _ = json.Unmarshal(params[field], &name); name == "" {
-		return HeaderArgument{}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing " + field}
+		return headerArgument{}, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "missing " + field}
 	}
-	return HeaderArgument{HeaderName, name}, nil
+	return headerArgument{HeaderName, name}, nil
 }

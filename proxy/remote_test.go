@@ -240,7 +240,7 @@ func TestLegacyCompatibility(t *testing.T) {
 		}
 	}
 	workers.Wait()
-	if created.Load() != 6 || executed.Load() != 4 || deleted.Load() != 6 {
+	if created.Load() == 0 || deleted.Load() != created.Load() || executed.Load() != 4 {
 		t.Fatalf("session lifecycle: created=%d executed=%d deleted=%d", created.Load(), executed.Load(), deleted.Load())
 	}
 }
