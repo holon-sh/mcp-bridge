@@ -825,6 +825,7 @@ func TestProxyTransports(t *testing.T) {
 	}
 	pinnedModes := []mode{{name: ProtocolVersion, version: ProtocolVersion}}
 	modes := []mode{
+		{name: "sse-oldest", version: "2024-11-05", sse: true},
 		{name: "sse", version: "2025-11-25", sse: true},
 		{name: "fallback", version: "2025-11-25", fallback: true},
 	}
@@ -1184,8 +1185,9 @@ func TestLegacySessionLimit(t *testing.T) {
 	}
 	server := httptest.NewServer(b)
 	t.Cleanup(func() { b.Close(); server.Close() })
-	for i := range 65 {
-		request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"limit","version":"1"},"capabilities":{}}}`))
+	initialize := func(version, capabilities string) int {
+		t.Helper()
+		request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"`+version+`","clientInfo":{"name":"limit","version":"1"},"capabilities":`+capabilities+`}}`))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Accept", "application/json, text/event-stream")
 		response, err := server.Client().Do(request)
@@ -1197,12 +1199,18 @@ func TestLegacySessionLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		return response.StatusCode
+	}
+	if initialize("2025-11-25", "[]") != 400 || initialize(ProtocolVersion, "{}") != 400 {
+		t.Fatal("accepted an invalid legacy handshake")
+	}
+	for i := range 65 {
 		status := 200
 		if i == 64 {
 			status = 503
 		}
-		if response.StatusCode != status {
-			t.Fatalf("session %d: HTTP %d", i, response.StatusCode)
+		if got := initialize("2025-11-25", "{}"); got != status {
+			t.Fatalf("session %d: HTTP %d", i, got)
 		}
 	}
 	if err := b.Close(); err != nil {

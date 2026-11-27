@@ -197,18 +197,17 @@ func (b *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "initialize" {
 		var params mcp.InitializeParams
-		_ = json.Unmarshal(req.Params, &params)
+		err := json.Unmarshal(req.Params, &params)
 		if header := r.Header.Get(proxy.HeaderProtocolVersion); header != "" && header != params.ProtocolVersion {
 			WriteError(w, 400, req.ID, proxy.Mismatch(proxy.HeaderProtocolVersion))
 			return
 		}
-		if !req.IsCall() || !proxy.IsLegacyVersion(params.ProtocolVersion) {
+		if err != nil || !req.IsCall() || !proxy.IsLegacyVersion(params.ProtocolVersion) {
 			WriteError(w, 400, req.ID, &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "initialize requires a supported legacy protocol"})
 			return
 		}
 		id := rand.Text()
-		t := &mcp.StreamableServerTransport{SessionID: id, EventStore: b.legacyEvents}
-		s, err := b.newSession(id, t)
+		s, err := b.newSession(id, &mcp.StreamableServerTransport{SessionID: id, EventStore: b.legacyEvents})
 		if err != nil {
 			http.Error(w, "could not start MCP session", 503)
 			return
