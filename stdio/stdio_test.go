@@ -188,6 +188,69 @@ func modernHandler(server *mcp.Server) http.Handler {
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
 }
 
+func TestStdioSubscriptions(t *testing.T) {
+	for _, ending := range []string{"unsubscribe", "disconnect", "rejected"} {
+		t.Run(ending, func(t *testing.T) {
+			stopped := make(chan struct{})
+			server := mcp.NewServer(&mcp.Implementation{Name: "chat", Version: "1"}, &mcp.ServerOptions{
+				SupportedProtocolVersions: []string{"2026-07-28"},
+				Capabilities:              &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{Subscribe: true}},
+				SubscribeHandler: func(context.Context, *mcp.SubscribeRequest) error {
+					if ending == "rejected" {
+						return errors.New("subscription denied")
+					}
+					return nil
+				},
+				UnsubscribeHandler: func(context.Context, *mcp.UnsubscribeRequest) error { close(stopped); return nil },
+			})
+			updates := make(chan *mcp.ResourceUpdatedNotificationParams, 1)
+			stopStream := make(chan context.CancelFunc, 1)
+			handler := modernHandler(server)
+			session, finished := connectClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Mcp-Method") == "subscriptions/listen" {
+					ctx, cancel := context.WithCancel(r.Context())
+					defer cancel()
+					stopStream <- cancel
+					r = r.WithContext(ctx)
+				}
+				handler.ServeHTTP(w, r)
+			}), &mcp.ClientOptions{ResourceUpdatedHandler: func(_ context.Context, r *mcp.ResourceUpdatedNotificationRequest) { updates <- r.Params }}, "2025-11-25")
+			err := session.Subscribe(t.Context(), &mcp.SubscribeParams{URI: "chat://messages"})
+			if ending == "rejected" {
+				var wire *jsonrpc.Error
+				if !errors.As(err, &wire) {
+					t.Fatalf("subscription rejection: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			if ending == "disconnect" {
+				(<-stopStream)()
+				if err := <-finished; err == nil {
+					t.Fatalf("stream loss: %v", err)
+				}
+			} else {
+				if err := server.ResourceUpdated(t.Context(), &mcp.ResourceUpdatedNotificationParams{URI: "chat://messages"}); err != nil {
+					t.Fatal(err)
+				}
+				update := <-updates
+				if update.URI != "chat://messages" || update.Meta[mcp.MetaKeySubscriptionID] != nil {
+					t.Fatalf("legacy notification: %v", update)
+				}
+				if err := session.Unsubscribe(t.Context(), &mcp.UnsubscribeParams{URI: "chat://messages"}); err != nil {
+					t.Fatal(err)
+				}
+				<-stopped
+				if _, err := session.ListTools(t.Context(), nil); err != nil {
+					t.Fatalf("unsubscribe disconnected client: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestStdioRequestCancellation(t *testing.T) {
 	started, stopped := make(chan struct{}), make(chan struct{})
 	server := mcp.NewServer(&mcp.Implementation{Name: "job", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: []string{"2026-07-28"}})
