@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"runtime/debug"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -18,7 +19,7 @@ func init() {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		for _, module := range append([]*debug.Module{&info.Main}, info.Deps...) {
 			if module.Path == "github.com/holon-sh/mcp-bridge" && module.Version != "" {
-				Bridge.Version = module.Version
+				Bridge.Version = strings.TrimPrefix(module.Version, "v")
 			}
 		}
 	}
