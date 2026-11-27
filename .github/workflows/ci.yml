@@ -19,6 +19,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
+      # Holon ships Windows builds of mcp-bridge connect in its MCP bundles.
+      - run: GOOS=windows go vet ./...
       - run: go test -race ./... -timeout 120s
   release-check:
     runs-on: ubuntu-latest

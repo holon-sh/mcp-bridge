@@ -26,9 +26,10 @@ type processConnection struct {
 	writeMu sync.Mutex
 }
 
-// startProcess runs cmd in its own process group, so stopping it also stops
-// its descendants.
 func startProcess(ctx context.Context, cmd *exec.Cmd) (*processConnection, error) {
+	if err := isolate(cmd); err != nil {
+		return nil, err
+	}
 	in, input, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -39,9 +40,6 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*processConnection, error
 		input.Close()
 		return nil, err
 	}
-	attrs := *cmp.Or(cmd.SysProcAttr, &syscall.SysProcAttr{})
-	attrs.Setpgid = true
-	cmd.SysProcAttr = &attrs
 	cmd.Stdin, cmd.Stdout = in, out
 	cmd.WaitDelay = min(cmp.Or(cmd.WaitDelay, shutdownGrace), shutdownGrace)
 	err = cmd.Start()
@@ -55,12 +53,8 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*processConnection, error
 	// IOTransport.Connect only wraps the pipes and cannot fail.
 	conn, _ := (&mcp.IOTransport{Reader: output, Writer: input, MaxLineLength: proxy.MaxMessageBytes}).Connect(ctx)
 	p := &processConnection{Connection: conn, cmd: cmd, stdin: input, log: cmp.Or(cmd.Stderr, io.Discard), exited: make(chan struct{})}
-	go func() { _ = cmd.Wait(); p.signal(syscall.SIGKILL); close(p.exited) }()
+	go func() { _ = cmd.Wait(); signal(cmd, syscall.SIGKILL); close(p.exited) }()
 	return p, nil
-}
-
-func (p *processConnection) signal(signal syscall.Signal) {
-	_ = syscall.Kill(-p.cmd.Process.Pid, signal)
 }
 
 func (p *processConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
@@ -76,15 +70,15 @@ func (p *processConnection) Write(ctx context.Context, msg jsonrpc.Message) erro
 }
 
 // Close closes the process's input, then signals its process group with
-// SIGTERM and SIGKILL until it exits.
+// SIGTERM and then SIGKILL until it exits.
 func (p *processConnection) Close() error {
 	p.once.Do(func() {
 		_ = p.stdin.Close()
-		for _, signal := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
 			select {
 			case <-p.exited:
 			case <-time.After(shutdownGrace):
-				p.signal(signal)
+				signal(p.cmd, sig)
 			}
 		}
 		<-p.exited
